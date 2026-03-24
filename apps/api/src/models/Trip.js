@@ -29,6 +29,7 @@ const tripSchema = new mongoose.Schema(
     pickupAddress: { type: String, default: null },
     dropoff: { type: latLngSchema, default: null },
     dropoffAddress: { type: String, default: null },
+    preferredPickupAt: { type: Date, default: null },
     status: {
       type: String,
       enum: ["requested", "accepted", "in_progress", "completed", "cancelled"],

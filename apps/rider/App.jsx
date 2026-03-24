@@ -19,6 +19,46 @@ import { StatusBar } from "expo-status-bar";
 import { getApiUrl, getGoogleGeocodingApiKey } from "./lib/config";
 
 const TOKEN_KEY = "tnc_token";
+const PICKUP_TIME_OFFSETS = [0, 20, 40, 60];
+const MAP_STYLE_CLEAN = [
+  { elementType: "geometry", stylers: [{ color: "#f5f7fb" }] },
+  { elementType: "labels.text.fill", stylers: [{ color: "#6b7280" }] },
+  { elementType: "labels.text.stroke", stylers: [{ color: "#f5f7fb" }] },
+  { featureType: "poi", stylers: [{ visibility: "off" }] },
+  { featureType: "transit", stylers: [{ visibility: "off" }] },
+  { featureType: "road", elementType: "geometry", stylers: [{ color: "#ffffff" }] },
+  { featureType: "road.arterial", elementType: "geometry", stylers: [{ color: "#eef2ff" }] },
+  { featureType: "road.highway", elementType: "geometry", stylers: [{ color: "#dbeafe" }] },
+  { featureType: "road.highway", elementType: "labels", stylers: [{ visibility: "off" }] },
+  { featureType: "water", elementType: "geometry", stylers: [{ color: "#dbeafe" }] },
+  { featureType: "administrative", elementType: "labels.text.fill", stylers: [{ color: "#94a3b8" }] },
+];
+const MAP_STYLE_CONTRAST = [
+  { elementType: "geometry", stylers: [{ color: "#f8fafc" }] },
+  { elementType: "labels.text.fill", stylers: [{ color: "#334155" }] },
+  { elementType: "labels.text.stroke", stylers: [{ color: "#ffffff" }] },
+  { featureType: "poi", elementType: "labels.text.fill", stylers: [{ color: "#64748b" }] },
+  { featureType: "road", elementType: "geometry", stylers: [{ color: "#ffffff" }] },
+  { featureType: "road.arterial", elementType: "geometry", stylers: [{ color: "#e2e8f0" }] },
+  { featureType: "road.highway", elementType: "geometry", stylers: [{ color: "#c7d2fe" }] },
+  { featureType: "water", elementType: "geometry", stylers: [{ color: "#bfdbfe" }] },
+];
+const MAP_STYLE_NIGHT = [
+  { elementType: "geometry", stylers: [{ color: "#111827" }] },
+  { elementType: "labels.text.fill", stylers: [{ color: "#cbd5e1" }] },
+  { elementType: "labels.text.stroke", stylers: [{ color: "#111827" }] },
+  { featureType: "poi", elementType: "labels.text.fill", stylers: [{ color: "#94a3b8" }] },
+  { featureType: "road", elementType: "geometry", stylers: [{ color: "#1f2937" }] },
+  { featureType: "road.arterial", elementType: "geometry", stylers: [{ color: "#334155" }] },
+  { featureType: "road.highway", elementType: "geometry", stylers: [{ color: "#4338ca" }] },
+  { featureType: "water", elementType: "geometry", stylers: [{ color: "#1d4ed8" }] },
+];
+const MAP_STYLE_OPTIONS = [
+  { id: "default", label: "Default", style: null },
+  { id: "clean", label: "Clean", style: MAP_STYLE_CLEAN },
+  { id: "contrast", label: "Contrast", style: MAP_STYLE_CONTRAST },
+  { id: "night", label: "Night", style: MAP_STYLE_NIGHT },
+];
 
 /** Padding so pins aren’t under the bottom overlay when framing both markers. */
 const MAP_EDGE_PADDING = { top: 96, right: 40, bottom: 220, left: 40 };
@@ -198,6 +238,31 @@ export default function App() {
   const [bookingStep, setBookingStep] = useState("pickup");
   /** For the active step: place pin on map or resolve typed address. */
   const [planEntryMode, setPlanEntryMode] = useState("map");
+  const [pickupOffsetMinutes, setPickupOffsetMinutes] = useState(0);
+  const [mapStyleId, setMapStyleId] = useState("default");
+  const pickupTimeOptions = useMemo(() => {
+    const now = new Date();
+    return PICKUP_TIME_OFFSETS.map((minutes) => {
+      if (minutes === 0) return { key: "asap", minutes, label: "ASAP", preferredPickupAt: null };
+      const at = new Date(now.getTime() + minutes * 60 * 1000);
+      return {
+        key: String(minutes),
+        minutes,
+        label: `+${minutes}m`,
+        preferredPickupAt: at.toISOString(),
+      };
+    });
+  }, []);
+
+  const preferredPickupAt =
+    pickupOffsetMinutes > 0
+      ? pickupTimeOptions.find((opt) => opt.minutes === pickupOffsetMinutes)?.preferredPickupAt || null
+      : null;
+  const activeMapStyle = useMemo(
+    () => MAP_STYLE_OPTIONS.find((x) => x.id === mapStyleId)?.style || null,
+    [mapStyleId]
+  );
+
   const [trip, setTrip] = useState(null);
   const [driverLive, setDriverLive] = useState(null);
   const [riderService, setRiderService] = useState({ driversAvailable: true, closedMessage: "" });
@@ -489,6 +554,7 @@ export default function App() {
     setDropoffQuery("");
     setBookingStep("pickup");
     setPlanEntryMode("map");
+    setPickupOffsetMinutes(0);
     socketRef.current?.disconnect();
   };
 
@@ -527,6 +593,8 @@ export default function App() {
       ]);
       const body = {
         pickup: { lat: Number(pickup.lat), lng: Number(pickup.lng) },
+        pickupOffsetMinutes,
+        preferredPickupAt,
         ...(pickupAddress ? { pickupAddress } : {}),
         ...(dropoff
           ? {
@@ -737,6 +805,7 @@ export default function App() {
       ? { lat: trip.driverLocation.lat, lng: trip.driverLocation.lng }
       : null);
 
+
   const region = useMemo(() => {
     const p = displayPickup || { lat: 37.78, lng: -122.4 };
     const d = displayDropoff;
@@ -899,10 +968,27 @@ export default function App() {
           </View>
         </View>
       ) : null}
+      <View style={styles.mapStyleBar} pointerEvents="box-none">
+        <View style={styles.mapStyleChips} pointerEvents="auto">
+          {MAP_STYLE_OPTIONS.map((opt) => {
+            const active = mapStyleId === opt.id;
+            return (
+              <Pressable
+                key={opt.id}
+                style={[styles.mapStyleChip, active && styles.mapStyleChipActive]}
+                onPress={() => setMapStyleId(opt.id)}
+              >
+                <Text style={[styles.mapStyleChipText, active && styles.mapStyleChipTextActive]}>{opt.label}</Text>
+              </Pressable>
+            );
+          })}
+        </View>
+      </View>
       <MapView
         ref={mapRef}
         style={StyleSheet.absoluteFill}
         provider={PROVIDER_GOOGLE}
+        customMapStyle={activeMapStyle || undefined}
         initialRegion={region}
         onPress={(e) => {
           if (trip) return;
@@ -985,6 +1071,23 @@ export default function App() {
                 ? "Step 1 — Set your pickup on the map, use My location, or type an address."
                 : "Step 2 — Set your dropoff the same way, then request your ride."}
             </Text>
+            <View style={styles.timeRow}>
+              <Text style={styles.timeLabel}>Pickup time</Text>
+              <View style={styles.timeChips}>
+                {pickupTimeOptions.map((opt) => {
+                  const active = pickupOffsetMinutes === opt.minutes;
+                  return (
+                    <Pressable
+                      key={opt.key}
+                      style={[styles.timeChip, active && styles.timeChipActive]}
+                      onPress={() => setPickupOffsetMinutes(opt.minutes)}
+                    >
+                      <Text style={[styles.timeChipText, active && styles.timeChipTextActive]}>{opt.label}</Text>
+                    </Pressable>
+                  );
+                })}
+              </View>
+            </View>
             <View style={styles.modeRow}>
               <Pressable
                 style={[styles.modeBtn, planEntryMode === "map" && styles.modeBtnActive]}
@@ -1280,6 +1383,32 @@ const styles = StyleSheet.create({
     bottom: 36,
     gap: 10,
   },
+  mapStyleBar: {
+    position: "absolute",
+    top: 56,
+    left: 12,
+    right: 12,
+    zIndex: 18,
+  },
+  mapStyleChips: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
+  },
+  mapStyleChip: {
+    backgroundColor: "rgba(255,255,255,0.95)",
+    borderColor: "#cbd5e1",
+    borderWidth: 1,
+    borderRadius: 999,
+    paddingVertical: 7,
+    paddingHorizontal: 12,
+  },
+  mapStyleChipActive: {
+    backgroundColor: "#0f172a",
+    borderColor: "#0f172a",
+  },
+  mapStyleChipText: { color: "#0f172a", fontSize: 12, fontWeight: "700" },
+  mapStyleChipTextActive: { color: "#fff" },
   stepRow: {
     flexDirection: "row",
     alignItems: "center",
@@ -1384,6 +1513,28 @@ const styles = StyleSheet.create({
     gap: 8,
     alignItems: "center",
   },
+  timeRow: {
+    backgroundColor: "rgba(255,255,255,0.95)",
+    padding: 10,
+    borderRadius: 10,
+    gap: 8,
+  },
+  timeLabel: { color: "#334155", fontSize: 13, fontWeight: "600" },
+  timeChips: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
+  timeChip: {
+    backgroundColor: "#fff",
+    borderWidth: 1,
+    borderColor: "#cbd5e1",
+    borderRadius: 999,
+    paddingVertical: 7,
+    paddingHorizontal: 12,
+  },
+  timeChipActive: {
+    borderColor: "#2563eb",
+    backgroundColor: "#eff6ff",
+  },
+  timeChipText: { color: "#334155", fontSize: 13, fontWeight: "600" },
+  timeChipTextActive: { color: "#1d4ed8" },
   modeBtn: {
     backgroundColor: "rgba(255,255,255,0.95)",
     paddingVertical: 8,

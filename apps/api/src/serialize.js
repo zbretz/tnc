@@ -108,6 +108,7 @@ export function serializeTrip(t, options = {}) {
     ...(t.pickupAddress ? { pickupAddress: t.pickupAddress } : {}),
     ...(dropoff ? { dropoff } : {}),
     ...(t.dropoffAddress ? { dropoffAddress: t.dropoffAddress } : {}),
+    ...(t.preferredPickupAt ? { preferredPickupAt: t.preferredPickupAt.toISOString() } : {}),
     status: t.status,
     ...(riderPhone ? { riderPhone } : {}),
     driverLocation: t.driverLocation?.updatedAt

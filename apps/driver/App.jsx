@@ -23,6 +23,45 @@ import { getApiUrl } from "./lib/config";
 const TOKEN_KEY = "tnc_token_driver";
 
 const MAP_EDGE_PADDING = { top: 96, right: 40, bottom: 200, left: 40 };
+const MAP_STYLE_CLEAN = [
+  { elementType: "geometry", stylers: [{ color: "#f5f7fb" }] },
+  { elementType: "labels.text.fill", stylers: [{ color: "#6b7280" }] },
+  { elementType: "labels.text.stroke", stylers: [{ color: "#f5f7fb" }] },
+  { featureType: "poi", stylers: [{ visibility: "off" }] },
+  { featureType: "transit", stylers: [{ visibility: "off" }] },
+  { featureType: "road", elementType: "geometry", stylers: [{ color: "#ffffff" }] },
+  { featureType: "road.arterial", elementType: "geometry", stylers: [{ color: "#eef2ff" }] },
+  { featureType: "road.highway", elementType: "geometry", stylers: [{ color: "#dbeafe" }] },
+  { featureType: "road.highway", elementType: "labels", stylers: [{ visibility: "off" }] },
+  { featureType: "water", elementType: "geometry", stylers: [{ color: "#dbeafe" }] },
+  { featureType: "administrative", elementType: "labels.text.fill", stylers: [{ color: "#94a3b8" }] },
+];
+const MAP_STYLE_CONTRAST = [
+  { elementType: "geometry", stylers: [{ color: "#f8fafc" }] },
+  { elementType: "labels.text.fill", stylers: [{ color: "#334155" }] },
+  { elementType: "labels.text.stroke", stylers: [{ color: "#ffffff" }] },
+  { featureType: "poi", elementType: "labels.text.fill", stylers: [{ color: "#64748b" }] },
+  { featureType: "road", elementType: "geometry", stylers: [{ color: "#ffffff" }] },
+  { featureType: "road.arterial", elementType: "geometry", stylers: [{ color: "#e2e8f0" }] },
+  { featureType: "road.highway", elementType: "geometry", stylers: [{ color: "#c7d2fe" }] },
+  { featureType: "water", elementType: "geometry", stylers: [{ color: "#bfdbfe" }] },
+];
+const MAP_STYLE_NIGHT = [
+  { elementType: "geometry", stylers: [{ color: "#111827" }] },
+  { elementType: "labels.text.fill", stylers: [{ color: "#cbd5e1" }] },
+  { elementType: "labels.text.stroke", stylers: [{ color: "#111827" }] },
+  { featureType: "poi", elementType: "labels.text.fill", stylers: [{ color: "#94a3b8" }] },
+  { featureType: "road", elementType: "geometry", stylers: [{ color: "#1f2937" }] },
+  { featureType: "road.arterial", elementType: "geometry", stylers: [{ color: "#334155" }] },
+  { featureType: "road.highway", elementType: "geometry", stylers: [{ color: "#4338ca" }] },
+  { featureType: "water", elementType: "geometry", stylers: [{ color: "#1d4ed8" }] },
+];
+const MAP_STYLE_OPTIONS = [
+  { id: "default", label: "Default", style: null },
+  { id: "clean", label: "Clean", style: MAP_STYLE_CLEAN },
+  { id: "contrast", label: "Contrast", style: MAP_STYLE_CONTRAST },
+  { id: "night", label: "Night", style: MAP_STYLE_NIGHT },
+];
 
 function stripUndefined(obj) {
   if (obj == null || typeof obj !== "object" || Array.isArray(obj)) return obj;
@@ -117,6 +156,14 @@ function openMapsNavigation(lat, lng, label) {
   Linking.openURL(`https://www.google.com/maps/dir/?api=1&destination=${la},${lo}`).catch(fail);
 }
 
+function preferredPickupLabel(trip) {
+  const raw = trip?.preferredPickupAt;
+  if (!raw) return "ASAP";
+  const d = new Date(raw);
+  if (!Number.isFinite(d.getTime())) return "ASAP";
+  return `Preferred pickup: ${d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`;
+}
+
 async function fetchDrivingPreviewCoords(token, from, to) {
   if (!from || !to || !token) return null;
   const fla = Number(from.lat);
@@ -182,10 +229,15 @@ export default function App() {
   const [adminClosedMsgDraft, setAdminClosedMsgDraft] = useState("");
   const [activeDrivingCoords, setActiveDrivingCoords] = useState(null);
   const [previewDrivingCoords, setPreviewDrivingCoords] = useState(null);
+  const [mapStyleId, setMapStyleId] = useState("default");
   const socketRef = useRef(null);
   const watchRef = useRef(null);
   const mapRef = useRef(null);
   const formatPoint = useCallback((pt) => `${pt.lat.toFixed(5)}, ${pt.lng.toFixed(5)}`, []);
+  const activeMapStyle = useMemo(
+    () => MAP_STYLE_OPTIONS.find((x) => x.id === mapStyleId)?.style || null,
+    [mapStyleId]
+  );
   const pickupLabel = useCallback(
     (t) => compactAddress(t?.pickupAddress) || (t?.pickup ? formatPoint(t.pickup) : "Unknown"),
     [formatPoint]
@@ -203,6 +255,7 @@ export default function App() {
     if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
     return { lat: Number(lat.toFixed(3)), lng: Number(lng.toFixed(3)) };
   }, [me?.lat, me?.lng]);
+
 
   const openNavigatePickupFor = useCallback(
     (t) => {
@@ -797,10 +850,27 @@ export default function App() {
     return (
       <View style={styles.container}>
         <StatusBar style="dark" />
+        <View style={styles.mapStyleBar} pointerEvents="box-none">
+          <View style={styles.mapStyleChips} pointerEvents="auto">
+            {MAP_STYLE_OPTIONS.map((opt) => {
+              const active = mapStyleId === opt.id;
+              return (
+                <Pressable
+                  key={opt.id}
+                  style={[styles.mapStyleChip, active && styles.mapStyleChipActive]}
+                  onPress={() => setMapStyleId(opt.id)}
+                >
+                  <Text style={[styles.mapStyleChipText, active && styles.mapStyleChipTextActive]}>{opt.label}</Text>
+                </Pressable>
+              );
+            })}
+          </View>
+        </View>
         <MapView
           ref={mapRef}
           style={StyleSheet.absoluteFill}
           provider={PROVIDER_GOOGLE}
+          customMapStyle={activeMapStyle || undefined}
           initialRegion={region}
         >
           {activeLineCoords.length >= 2 ? (
@@ -856,7 +926,7 @@ export default function App() {
                 <Text style={styles.smallBtnText}>Nav: pickup</Text>
               </Pressable>
             ) : null}
-            {hasDrop ? (
+            {enRouteDropoff && hasDrop ? (
               <Pressable style={styles.smallBtn} onPress={() => openNavigateDropoffFor(activeTrip)}>
                 <Text style={styles.smallBtnText}>Nav: dropoff</Text>
               </Pressable>
@@ -902,7 +972,28 @@ export default function App() {
     return (
       <View style={styles.container}>
         <StatusBar style="dark" />
-        <MapView style={StyleSheet.absoluteFill} provider={PROVIDER_GOOGLE} initialRegion={previewRegion}>
+        <View style={styles.mapStyleBar} pointerEvents="box-none">
+          <View style={styles.mapStyleChips} pointerEvents="auto">
+            {MAP_STYLE_OPTIONS.map((opt) => {
+              const active = mapStyleId === opt.id;
+              return (
+                <Pressable
+                  key={opt.id}
+                  style={[styles.mapStyleChip, active && styles.mapStyleChipActive]}
+                  onPress={() => setMapStyleId(opt.id)}
+                >
+                  <Text style={[styles.mapStyleChipText, active && styles.mapStyleChipTextActive]}>{opt.label}</Text>
+                </Pressable>
+              );
+            })}
+          </View>
+        </View>
+        <MapView
+          style={StyleSheet.absoluteFill}
+          provider={PROVIDER_GOOGLE}
+          customMapStyle={activeMapStyle || undefined}
+          initialRegion={previewRegion}
+        >
           {previewLineCoords.length >= 2 ? (
             <Polyline coordinates={previewLineCoords} strokeColor="#7c3aed" strokeWidth={4} />
           ) : null}
@@ -932,6 +1023,7 @@ export default function App() {
             Trip preview. Person icon = pickup.
             {` Flag icon = dropoff when set.\nPickup: ${pickupLabel(previewTrip)}`}
             {dropoffLabel(previewTrip) ? `\nDropoff: ${dropoffLabel(previewTrip)}` : "\nNo dropoff set on this request."}
+            {`\n${preferredPickupLabel(previewTrip)}`}
             {previewTrip.riderPhone ? `\nRider phone: ${previewTrip.riderPhone}` : ""}
           </Text>
           <View style={styles.row}>
@@ -1027,6 +1119,7 @@ export default function App() {
               Pickup: {pickupLabel(item)}
             </Text>
             <Text style={styles.cardMeta}>Dropoff: {dropoffLabel(item) || "Not set"}</Text>
+            <Text style={styles.cardMeta}>{preferredPickupLabel(item)}</Text>
             {item.riderPhone ? (
               <Text style={styles.cardPhone}>Rider phone: {item.riderPhone}</Text>
             ) : null}
@@ -1135,6 +1228,32 @@ const styles = StyleSheet.create({
     bottom: 36,
     gap: 10,
   },
+  mapStyleBar: {
+    position: "absolute",
+    top: 56,
+    left: 12,
+    right: 12,
+    zIndex: 18,
+  },
+  mapStyleChips: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
+  },
+  mapStyleChip: {
+    backgroundColor: "rgba(255,255,255,0.95)",
+    borderColor: "#cbd5e1",
+    borderWidth: 1,
+    borderRadius: 999,
+    paddingVertical: 7,
+    paddingHorizontal: 12,
+  },
+  mapStyleChipActive: {
+    backgroundColor: "#0f172a",
+    borderColor: "#0f172a",
+  },
+  mapStyleChipText: { color: "#0f172a", fontSize: 12, fontWeight: "700" },
+  mapStyleChipTextActive: { color: "#fff" },
   banner: {
     backgroundColor: "rgba(255,255,255,0.95)",
     padding: 12,

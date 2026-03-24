@@ -30,6 +30,21 @@ function parseAddress(value) {
   return out.slice(0, 240);
 }
 
+function parsePickupOffsetMinutes(value) {
+  if (value == null || value === "" || value === "asap") return 0;
+  const n = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(n)) return null;
+  if (![0, 20, 40, 60].includes(n)) return null;
+  return n;
+}
+
+function parsePreferredPickupAt(value) {
+  if (value == null || value === "" || value === "asap") return null;
+  const d = new Date(value);
+  if (!Number.isFinite(d.getTime())) return undefined;
+  return d;
+}
+
 function tripDriverIdString(trip) {
   if (!trip?.driver) return "";
   return String(trip.driver._id ?? trip.driver);
@@ -91,7 +106,7 @@ export function createTripsRouter(deps) {
       });
       return;
     }
-    const { pickup, dropoff, pickupAddress, dropoffAddress } = req.body || {};
+    const { pickup, dropoff, pickupAddress, dropoffAddress, pickupOffsetMinutes, preferredPickupAt } = req.body || {};
     const pickupLL = parseLatLng(pickup);
     if (!pickupLL) {
       res.status(400).json({ error: "pickup: { lat, lng } required" });
@@ -100,12 +115,25 @@ export function createTripsRouter(deps) {
     const dropoffLL = parseLatLng(dropoff);
     const pickupAddr = parseAddress(pickupAddress);
     const dropoffAddr = parseAddress(dropoffAddress);
+    const preferredAtParsed = parsePreferredPickupAt(preferredPickupAt);
+    if (preferredAtParsed === undefined) {
+      res.status(400).json({ error: "preferredPickupAt must be an ISO date-time or null/asap" });
+      return;
+    }
+    const offsetMinutes = parsePickupOffsetMinutes(pickupOffsetMinutes);
+    if (offsetMinutes == null) {
+      res.status(400).json({ error: "pickupOffsetMinutes must be one of: 0, 20, 40, 60" });
+      return;
+    }
+    const preferredAtFromOffset = offsetMinutes > 0 ? new Date(Date.now() + offsetMinutes * 60 * 1000) : null;
+    const resolvedPreferredPickupAt = preferredAtParsed ?? preferredAtFromOffset;
     const trip = await Trip.create({
       rider: req.userId,
       pickup: pickupLL,
       pickupAddress: pickupAddr,
       dropoff: dropoffLL,
       dropoffAddress: dropoffAddr,
+      preferredPickupAt: resolvedPreferredPickupAt,
       status: "requested",
     });
     const out = serializeTrip(trip);
