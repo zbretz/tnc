@@ -3,8 +3,10 @@ import {
   ActivityIndicator,
   Alert,
   Image,
+  Modal,
   Platform,
   Pressable,
+  ScrollView,
   StyleSheet,
   Text,
   TextInput,
@@ -19,6 +21,46 @@ import { StatusBar } from "expo-status-bar";
 import { getApiUrl, getGoogleGeocodingApiKey } from "./lib/config";
 
 const TOKEN_KEY = "tnc_token";
+
+const RIDER_FARE_FREE_FALLBACK_EXPLANATION =
+  "We're not charging fares while we test our new app and operations with local neighbors. Riding free helps us learn before we launch fully — thank you for being part of it.";
+
+function FreeRideWhyModal({ visible, explanation, onClose }) {
+  const body =
+    typeof explanation === "string" && explanation.trim().length > 0
+      ? explanation.trim()
+      : RIDER_FARE_FREE_FALLBACK_EXPLANATION;
+  return (
+    <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
+      <View style={styles.freeRideModalRoot}>
+        <Pressable style={StyleSheet.absoluteFill} onPress={onClose} accessibilityLabel="Dismiss" />
+        <View style={styles.freeRideModalCard}>
+          <Text style={styles.freeRideModalTitle}>Why is my ride free?</Text>
+          <ScrollView style={styles.freeRideModalScroll} keyboardShouldPersistTaps="handled">
+            <Text style={styles.freeRideModalBody}>{body}</Text>
+          </ScrollView>
+          <Pressable style={styles.freeRideModalBtn} onPress={onClose}>
+            <Text style={styles.freeRideModalBtnText}>Got it</Text>
+          </Pressable>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
+function FreeRideBanner({ onPressWhy }) {
+  return (
+    <View style={styles.freeRideBanner}>
+      <View style={styles.freeRideBannerTextCol}>
+        <Text style={styles.freeRideBannerTitle}>{"No fare — you're covered"}</Text>
+        <Text style={styles.freeRideBannerSub}>Local testing · quotes show $0</Text>
+      </View>
+      <Pressable style={styles.freeRideWhyChip} onPress={onPressWhy} hitSlop={8}>
+        <Text style={styles.freeRideWhyChipText}>Why?</Text>
+      </Pressable>
+    </View>
+  );
+}
 const PICKUP_TIME_OFFSETS = [0, 20, 40, 60];
 const MAP_STYLE_CLEAN = [
   { elementType: "geometry", stylers: [{ color: "#f5f7fb" }] },
@@ -151,6 +193,9 @@ async function fetchRiderServicePublic() {
   return {
     driversAvailable: data.driversAvailable !== false,
     closedMessage: typeof data.closedMessage === "string" ? data.closedMessage : "",
+    fareFreeEnabled: data.fareFreeEnabled === true,
+    fareFreeRiderExplanation:
+      typeof data.fareFreeRiderExplanation === "string" ? data.fareFreeRiderExplanation : "",
   };
 }
 
@@ -239,6 +284,7 @@ export default function App() {
   /** For the active step: place pin on map or resolve typed address. */
   const [planEntryMode, setPlanEntryMode] = useState("map");
   const [pickupOffsetMinutes, setPickupOffsetMinutes] = useState(0);
+  const [pickupTimeMenuOpen, setPickupTimeMenuOpen] = useState(false);
   const [mapStyleId, setMapStyleId] = useState("default");
   const pickupTimeOptions = useMemo(() => {
     const now = new Date();
@@ -258,6 +304,10 @@ export default function App() {
     pickupOffsetMinutes > 0
       ? pickupTimeOptions.find((opt) => opt.minutes === pickupOffsetMinutes)?.preferredPickupAt || null
       : null;
+  const selectedPickupTimeLabel = useMemo(() => {
+    const opt = pickupTimeOptions.find((o) => o.minutes === pickupOffsetMinutes);
+    return opt?.label ?? "ASAP";
+  }, [pickupTimeOptions, pickupOffsetMinutes]);
   const activeMapStyle = useMemo(
     () => MAP_STYLE_OPTIONS.find((x) => x.id === mapStyleId)?.style || null,
     [mapStyleId]
@@ -265,7 +315,13 @@ export default function App() {
 
   const [trip, setTrip] = useState(null);
   const [driverLive, setDriverLive] = useState(null);
-  const [riderService, setRiderService] = useState({ driversAvailable: true, closedMessage: "" });
+  const [riderService, setRiderService] = useState({
+    driversAvailable: true,
+    closedMessage: "",
+    fareFreeEnabled: false,
+    fareFreeRiderExplanation: "",
+  });
+  const [freeRideWhyOpen, setFreeRideWhyOpen] = useState(false);
   const [regPhone, setRegPhone] = useState("");
   const [planRouteCoords, setPlanRouteCoords] = useState(null);
   const [tripRouteCoords, setTripRouteCoords] = useState(null);
@@ -290,7 +346,14 @@ export default function App() {
         const c = await fetchRiderServicePublic();
         if (!cancelled) setRiderService(c);
       } catch {
-        if (!cancelled) setRiderService({ driversAvailable: true, closedMessage: "" });
+        if (!cancelled) {
+          setRiderService({
+            driversAvailable: true,
+            closedMessage: "",
+            fareFreeEnabled: false,
+            fareFreeRiderExplanation: "",
+          });
+        }
       }
     })();
     return () => {
@@ -340,6 +403,9 @@ export default function App() {
       setRiderService({
         driversAvailable: payload.driversAvailable !== false,
         closedMessage: typeof payload.closedMessage === "string" ? payload.closedMessage : "",
+        fareFreeEnabled: payload.fareFreeEnabled === true,
+        fareFreeRiderExplanation:
+          typeof payload.fareFreeRiderExplanation === "string" ? payload.fareFreeRiderExplanation : "",
       });
     };
 
@@ -590,6 +656,7 @@ export default function App() {
     setBookingStep("pickup");
     setPlanEntryMode("map");
     setPickupOffsetMinutes(0);
+    setPickupTimeMenuOpen(false);
     setFarePreview(null);
     socketRef.current?.disconnect();
   };
@@ -940,6 +1007,16 @@ export default function App() {
         <Text style={styles.apiHint} selectable>
           API: {getApiUrl()}
         </Text>
+        {riderService.fareFreeEnabled ? (
+          <View style={styles.freeRideBannerAuthWrap}>
+            <FreeRideBanner onPressWhy={() => setFreeRideWhyOpen(true)} />
+          </View>
+        ) : null}
+        <FreeRideWhyModal
+          visible={freeRideWhyOpen}
+          explanation={riderService.fareFreeRiderExplanation}
+          onClose={() => setFreeRideWhyOpen(false)}
+        />
         {ridersPaused ? (
           <View style={styles.publicClosedBanner}>
             <Text style={styles.publicClosedTitle}>Rides paused</Text>
@@ -981,6 +1058,11 @@ export default function App() {
   return (
     <View style={styles.container}>
       <StatusBar style="dark" />
+      <FreeRideWhyModal
+        visible={freeRideWhyOpen}
+        explanation={riderService.fareFreeRiderExplanation}
+        onClose={() => setFreeRideWhyOpen(false)}
+      />
       {showRidersClosedGate ? (
         <View style={styles.ridersClosedLayer} pointerEvents="box-none">
           <View style={styles.ridersClosedCard} pointerEvents="auto">
@@ -1005,6 +1087,9 @@ export default function App() {
         </View>
       ) : null}
       <View style={styles.mapStyleBar} pointerEvents="box-none">
+        {riderService.fareFreeEnabled ? (
+          <FreeRideBanner onPressWhy={() => setFreeRideWhyOpen(true)} />
+        ) : null}
         <View style={styles.mapStyleChips} pointerEvents="auto">
           {MAP_STYLE_OPTIONS.map((opt) => {
             const active = mapStyleId === opt.id;
@@ -1109,20 +1194,50 @@ export default function App() {
             </Text>
             <View style={styles.timeRow}>
               <Text style={styles.timeLabel}>Pickup time</Text>
-              <View style={styles.timeChips}>
-                {pickupTimeOptions.map((opt) => {
-                  const active = pickupOffsetMinutes === opt.minutes;
-                  return (
-                    <Pressable
-                      key={opt.key}
-                      style={[styles.timeChip, active && styles.timeChipActive]}
-                      onPress={() => setPickupOffsetMinutes(opt.minutes)}
-                    >
-                      <Text style={[styles.timeChipText, active && styles.timeChipTextActive]}>{opt.label}</Text>
+              <Pressable
+                style={styles.timeDropdown}
+                onPress={() => setPickupTimeMenuOpen(true)}
+                accessibilityRole="button"
+                accessibilityLabel="Pickup time"
+                accessibilityHint="Opens a list of pickup time options"
+              >
+                <Text style={styles.timeDropdownValue}>{selectedPickupTimeLabel}</Text>
+                <Text style={styles.timeDropdownChevron}>▾</Text>
+              </Pressable>
+              <Modal
+                visible={pickupTimeMenuOpen}
+                transparent
+                animationType="fade"
+                onRequestClose={() => setPickupTimeMenuOpen(false)}
+              >
+                <View style={styles.timeMenuRoot}>
+                  <Pressable style={styles.timeMenuBackdrop} onPress={() => setPickupTimeMenuOpen(false)} />
+                  <View style={styles.timeMenuSheet}>
+                    <Text style={styles.timeMenuTitle}>Pickup time</Text>
+                    {pickupTimeOptions.map((opt) => {
+                      const active = pickupOffsetMinutes === opt.minutes;
+                      return (
+                        <Pressable
+                          key={opt.key}
+                          style={[styles.timeMenuRow, active && styles.timeMenuRowActive]}
+                          onPress={() => {
+                            setPickupOffsetMinutes(opt.minutes);
+                            setPickupTimeMenuOpen(false);
+                          }}
+                        >
+                          <Text style={[styles.timeMenuRowText, active && styles.timeMenuRowTextActive]}>
+                            {opt.label}
+                          </Text>
+                          {active ? <Text style={styles.timeMenuCheck}>✓</Text> : null}
+                        </Pressable>
+                      );
+                    })}
+                    <Pressable style={styles.timeMenuCancel} onPress={() => setPickupTimeMenuOpen(false)}>
+                      <Text style={styles.timeMenuCancelText}>Cancel</Text>
                     </Pressable>
-                  );
-                })}
-              </View>
+                  </View>
+                </View>
+              </Modal>
             </View>
             <View style={styles.modeRow}>
               <Pressable
@@ -1210,13 +1325,33 @@ export default function App() {
                   {farePreview?.kind === "loading" ? (
                     <Text style={styles.farePreviewText}>Estimating fare…</Text>
                   ) : farePreview?.kind === "ok" ? (
-                    <Text style={styles.farePreviewText}>
-                      Estimated fare: {farePreview.estimate.currency === "USD" ? "$" : ""}
-                      {farePreview.estimate.total.toFixed(2)}
-                      {farePreview.estimate.breakdown?.trip?.durationText
-                        ? ` · ~${farePreview.estimate.breakdown.trip.durationText} trip`
-                        : ""}
-                    </Text>
+                    farePreview.estimate.breakdown?.fareFree ? (
+                      <View>
+                        <Text style={styles.farePreviewText}>
+                          Fare waived: $0.00
+                          {farePreview.estimate.breakdown?.trip?.durationText
+                            ? ` · ~${farePreview.estimate.breakdown.trip.durationText} trip`
+                            : ""}
+                        </Text>
+                        {typeof farePreview.estimate.breakdown?.waivedQuoteUsd === "number" ? (
+                          <Text style={styles.farePreviewMuted}>
+                            Would have been $
+                            {Number(farePreview.estimate.breakdown.waivedQuoteUsd).toFixed(2)} without the waiver
+                          </Text>
+                        ) : null}
+                        <Pressable style={styles.farePreviewWhy} onPress={() => setFreeRideWhyOpen(true)}>
+                          <Text style={styles.farePreviewWhyText}>Why is this free?</Text>
+                        </Pressable>
+                      </View>
+                    ) : (
+                      <Text style={styles.farePreviewText}>
+                        Estimated fare: {farePreview.estimate.currency === "USD" ? "$" : ""}
+                        {farePreview.estimate.total.toFixed(2)}
+                        {farePreview.estimate.breakdown?.trip?.durationText
+                          ? ` · ~${farePreview.estimate.breakdown.trip.durationText} trip`
+                          : ""}
+                      </Text>
+                    )
                   ) : farePreview?.kind === "err" ? (
                     <Text style={styles.farePreviewMuted}>Fare estimate unavailable (check Distance Matrix key).</Text>
                   ) : null}
@@ -1277,10 +1412,27 @@ export default function App() {
               <Text style={styles.addrText}>Pickup: {trip?.pickupAddress || "Not available"}</Text>
               <Text style={styles.addrText}>Dropoff: {trip?.dropoffAddress || "Not set"}</Text>
               {trip?.fareEstimate?.total != null ? (
-                <Text style={styles.farePreviewText}>
-                  Fare (at request): {trip.fareEstimate.currency === "USD" ? "$" : ""}
-                  {Number(trip.fareEstimate.total).toFixed(2)}
-                </Text>
+                trip.fareEstimate.breakdown?.fareFree ? (
+                  <View>
+                    <Text style={styles.farePreviewText}>
+                      Fare (at request): waived · $
+                      {Number(trip.fareEstimate.total).toFixed(2)}
+                    </Text>
+                    {typeof trip.fareEstimate.breakdown?.waivedQuoteUsd === "number" ? (
+                      <Text style={styles.farePreviewMuted}>
+                        Would have been ${Number(trip.fareEstimate.breakdown.waivedQuoteUsd).toFixed(2)}
+                      </Text>
+                    ) : null}
+                    <Pressable style={styles.farePreviewWhy} onPress={() => setFreeRideWhyOpen(true)}>
+                      <Text style={styles.farePreviewWhyText}>Why is this free?</Text>
+                    </Pressable>
+                  </View>
+                ) : (
+                  <Text style={styles.farePreviewText}>
+                    Fare (at request): {trip.fareEstimate.currency === "USD" ? "$" : ""}
+                    {Number(trip.fareEstimate.total).toFixed(2)}
+                  </Text>
+                )
               ) : null}
             </View>
           </>
@@ -1332,6 +1484,56 @@ export default function App() {
 
 const styles = StyleSheet.create({
   container: { flex: 1 },
+  freeRideBannerAuthWrap: { marginBottom: 12 },
+  freeRideBanner: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    backgroundColor: "#ecfdf5",
+    borderRadius: 14,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    marginBottom: 8,
+    borderWidth: 1,
+    borderColor: "#6ee7b7",
+  },
+  freeRideBannerTextCol: { flex: 1, marginRight: 10 },
+  freeRideBannerTitle: { fontSize: 14, fontWeight: "800", color: "#065f46" },
+  freeRideBannerSub: { fontSize: 12, color: "#047857", marginTop: 2 },
+  freeRideWhyChip: {
+    backgroundColor: "#059669",
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 999,
+  },
+  freeRideWhyChipText: { color: "#fff", fontWeight: "800", fontSize: 13 },
+  freeRideModalRoot: {
+    flex: 1,
+    backgroundColor: "rgba(15,23,42,0.5)",
+    justifyContent: "center",
+    paddingHorizontal: 20,
+  },
+  freeRideModalCard: {
+    backgroundColor: "#fff",
+    borderRadius: 16,
+    padding: 20,
+    maxHeight: "72%",
+    borderWidth: 1,
+    borderColor: "#e2e8f0",
+  },
+  freeRideModalScroll: { maxHeight: 280, marginBottom: 12 },
+  freeRideModalTitle: { fontSize: 18, fontWeight: "800", color: "#0f172a", marginBottom: 12 },
+  freeRideModalBody: { fontSize: 15, color: "#475569", lineHeight: 22 },
+  freeRideModalBtn: {
+    alignSelf: "stretch",
+    backgroundColor: "#059669",
+    paddingVertical: 12,
+    borderRadius: 10,
+    alignItems: "center",
+  },
+  freeRideModalBtnText: { color: "#fff", fontWeight: "800", fontSize: 15 },
+  farePreviewWhy: { alignSelf: "flex-start", marginTop: 6, paddingVertical: 4 },
+  farePreviewWhyText: { fontSize: 13, fontWeight: "800", color: "#059669", textDecorationLine: "underline" },
   publicClosedBanner: {
     backgroundColor: "#fef3c7",
     borderRadius: 12,
@@ -1577,21 +1779,67 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   timeLabel: { color: "#334155", fontSize: 13, fontWeight: "600" },
-  timeChips: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
-  timeChip: {
+  timeDropdown: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
     backgroundColor: "#fff",
     borderWidth: 1,
     borderColor: "#cbd5e1",
-    borderRadius: 999,
-    paddingVertical: 7,
-    paddingHorizontal: 12,
+    borderRadius: 10,
+    paddingVertical: 12,
+    paddingHorizontal: 14,
   },
-  timeChipActive: {
-    borderColor: "#2563eb",
-    backgroundColor: "#eff6ff",
+  timeDropdownValue: { color: "#0f172a", fontSize: 15, fontWeight: "600" },
+  timeDropdownChevron: { color: "#64748b", fontSize: 16, fontWeight: "700", marginLeft: 8 },
+  timeMenuRoot: {
+    flex: 1,
+    justifyContent: "flex-end",
   },
-  timeChipText: { color: "#334155", fontSize: 13, fontWeight: "600" },
-  timeChipTextActive: { color: "#1d4ed8" },
+  timeMenuBackdrop: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: "rgba(15,23,42,0.45)",
+  },
+  timeMenuSheet: {
+    backgroundColor: "#fff",
+    borderTopLeftRadius: 16,
+    borderTopRightRadius: 16,
+    paddingBottom: Platform.OS === "ios" ? 28 : 20,
+    paddingTop: 12,
+    borderWidth: 1,
+    borderColor: "#e2e8f0",
+  },
+  timeMenuTitle: {
+    fontSize: 13,
+    fontWeight: "700",
+    color: "#64748b",
+    textTransform: "uppercase",
+    letterSpacing: 0.5,
+    paddingHorizontal: 20,
+    paddingBottom: 8,
+  },
+  timeMenuRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    paddingVertical: 16,
+    paddingHorizontal: 20,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: "#e2e8f0",
+  },
+  timeMenuRowActive: { backgroundColor: "#eff6ff" },
+  timeMenuRowText: { fontSize: 17, color: "#0f172a", fontWeight: "500" },
+  timeMenuRowTextActive: { color: "#1d4ed8", fontWeight: "700" },
+  timeMenuCheck: { fontSize: 18, color: "#2563eb", fontWeight: "700" },
+  timeMenuCancel: {
+    marginTop: 8,
+    marginHorizontal: 16,
+    paddingVertical: 14,
+    alignItems: "center",
+    borderRadius: 10,
+    backgroundColor: "#f1f5f9",
+  },
+  timeMenuCancelText: { fontSize: 16, fontWeight: "600", color: "#475569" },
   modeBtn: {
     backgroundColor: "rgba(255,255,255,0.95)",
     paddingVertical: 8,

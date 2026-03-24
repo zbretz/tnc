@@ -11,7 +11,11 @@ import { verifyToken } from "./middleware/auth.js";
 import { serializeTrip } from "./serialize.js";
 import { tryRefreshPickupEta } from "./pickupEta.js";
 import { seedDevDriversIfNeeded } from "./seedDevDrivers.js";
-import { ensureAppSettings, getRiderServiceConfig } from "./models/AppSettings.js";
+import {
+  ensureAppSettings,
+  getRiderServiceConfig,
+  riderFacingRiderServicePayload,
+} from "./models/AppSettings.js";
 import { createAdminRouter } from "./routes/admin.js";
 import { routesRouter } from "./routes/routes.js";
 import { pricingRouter } from "./routes/pricing.js";
@@ -61,7 +65,7 @@ app.use("/pricing", pricingRouter);
 app.get("/config/rider", async (_req, res) => {
   try {
     const cfg = await getRiderServiceConfig();
-    res.json(cfg);
+    res.json(riderFacingRiderServicePayload(cfg));
   } catch (e) {
     console.error("GET /config/rider", e);
     res.status(500).json({ error: "Server error" });
@@ -98,7 +102,7 @@ io.on("connection", (socket) => {
   if (role === "rider") {
     socket.join("riders");
     getRiderServiceConfig()
-      .then((cfg) => socket.emit("riderService:updated", cfg))
+      .then((cfg) => socket.emit("riderService:updated", riderFacingRiderServicePayload(cfg)))
       .catch(() => {});
   }
 

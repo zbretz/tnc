@@ -18,9 +18,26 @@ import * as Location from "expo-location";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { io } from "socket.io-client";
 import { StatusBar } from "expo-status-bar";
+import Slider from "@react-native-community/slider";
 import { getApiUrl } from "./lib/config";
 
 const TOKEN_KEY = "tnc_token_driver";
+
+/** Quoted fare = calculated fare × (pct / 100); 50–150%, 100 = baseline. */
+const FARE_ADJUSTMENT_PRESETS = [50, 75, 100, 125, 150];
+
+function fareAdjustmentSummary(pct) {
+  const n = typeof pct === "number" && Number.isFinite(pct) ? Math.round(pct) : 100;
+  if (n === 100) return "Standard — 100% of calculated fare";
+  if (n < 100) return `${n}% — ${100 - n}% below calculated`;
+  return `${n}% — +${n - 100}% surge`;
+}
+
+function fareAdjustmentTrackColor(pct) {
+  if (pct < 100) return "#059669";
+  if (pct > 100) return "#ea580c";
+  return "#7c3aed";
+}
 
 const MAP_EDGE_PADDING = { top: 96, right: 40, bottom: 200, left: 40 };
 const MAP_STYLE_CLEAN = [
@@ -227,6 +244,8 @@ export default function App() {
   const [devRefreshing, setDevRefreshing] = useState(false);
   const [adminRiderCfg, setAdminRiderCfg] = useState(null);
   const [adminClosedMsgDraft, setAdminClosedMsgDraft] = useState("");
+  const [adminFareAdjustmentDraft, setAdminFareAdjustmentDraft] = useState(100);
+  const [adminFreeExplanationDraft, setAdminFreeExplanationDraft] = useState("");
   const [activeDrivingCoords, setActiveDrivingCoords] = useState(null);
   const [previewDrivingCoords, setPreviewDrivingCoords] = useState(null);
   const [mapStyleId, setMapStyleId] = useState("default");
@@ -315,6 +334,12 @@ export default function App() {
         if (!cancelled) {
           setAdminRiderCfg(c);
           setAdminClosedMsgDraft(c.closedMessage || "");
+          setAdminFareAdjustmentDraft(
+            typeof c.fareAdjustmentPercent === "number" ? c.fareAdjustmentPercent : 100
+          );
+          setAdminFreeExplanationDraft(
+            typeof c.fareFreeRiderExplanationStored === "string" ? c.fareFreeRiderExplanationStored : ""
+          );
         }
       } catch {
         if (!cancelled) setAdminRiderCfg(null);
@@ -332,8 +357,27 @@ export default function App() {
         const c = await api("/admin/rider-service", { method: "PATCH", token, body });
         setAdminRiderCfg(c);
         setAdminClosedMsgDraft(c.closedMessage || "");
+        setAdminFareAdjustmentDraft(
+          typeof c.fareAdjustmentPercent === "number" ? c.fareAdjustmentPercent : 100
+        );
+        setAdminFreeExplanationDraft(
+          typeof c.fareFreeRiderExplanationStored === "string" ? c.fareFreeRiderExplanationStored : ""
+        );
       } catch (e) {
         Alert.alert("Rider app settings", String(e));
+        try {
+          const c = await api("/admin/rider-service", { token });
+          setAdminRiderCfg(c);
+          setAdminClosedMsgDraft(c.closedMessage || "");
+          setAdminFareAdjustmentDraft(
+            typeof c.fareAdjustmentPercent === "number" ? c.fareAdjustmentPercent : 100
+          );
+          setAdminFreeExplanationDraft(
+            typeof c.fareFreeRiderExplanationStored === "string" ? c.fareFreeRiderExplanationStored : ""
+          );
+        } catch {
+          /* ignore */
+        }
       }
     },
     [token]
@@ -1101,6 +1145,106 @@ export default function App() {
               >
                 <Text style={styles.adminSaveMsgText}>Save message</Text>
               </Pressable>
+              <View style={styles.adminFreeRidePanel}>
+                <Text style={[styles.adminLabel, styles.adminLabelBlock]}>Free rides (locals / testing)</Text>
+                <Pressable
+                  style={[
+                    styles.adminFreeRideBtn,
+                    adminRiderCfg.fareFreeEnabled === true && styles.adminFreeRideBtnOn,
+                  ]}
+                  onPress={() =>
+                    patchAdminRiderService({ fareFreeEnabled: adminRiderCfg.fareFreeEnabled !== true })
+                  }
+                >
+                  <Text
+                    style={[
+                      styles.adminFreeRideBtnText,
+                      adminRiderCfg.fareFreeEnabled === true && styles.adminFreeRideBtnTextOn,
+                    ]}
+                  >
+                    {adminRiderCfg.fareFreeEnabled === true
+                      ? "Free rides ON — tap to charge fares again"
+                      : "Free rides — tap to waive all fares ($0)"}
+                  </Text>
+                </Pressable>
+                <Text style={styles.adminHint}>
+                  Riders see a green banner, $0 quotes, and a &quot;Why?&quot; button. The fare multiplier below is
+                  ignored while this is on.
+                </Text>
+                <Text style={[styles.adminLabel, styles.adminLabelBlock]}>“Why?” message for riders</Text>
+                <TextInput
+                  style={styles.adminInputMultiline}
+                  value={adminFreeExplanationDraft}
+                  onChangeText={setAdminFreeExplanationDraft}
+                  placeholder="Leave blank to use the default explanation, or describe your pilot here."
+                  multiline
+                  textAlignVertical="top"
+                />
+                <Pressable
+                  style={styles.adminSaveMsg}
+                  onPress={() =>
+                    patchAdminRiderService({ fareFreeRiderExplanation: adminFreeExplanationDraft })
+                  }
+                >
+                  <Text style={styles.adminSaveMsgText}>Save “Why?” message</Text>
+                </Pressable>
+              </View>
+              <View style={styles.adminFarePanel}>
+                <Text style={[styles.adminLabel, styles.adminLabelBlock]}>Quoted fare vs calculated</Text>
+                <View style={styles.fareAdjSummaryPill}>
+                  <Text style={styles.fareAdjSummaryText}>
+                    {fareAdjustmentSummary(adminFareAdjustmentDraft)}
+                  </Text>
+                </View>
+                <View style={styles.fareAdjScaleRow}>
+                  <Text style={styles.fareAdjScaleEdge}>50%</Text>
+                  <Text style={styles.fareAdjScaleMid}>100% baseline</Text>
+                  <Text style={styles.fareAdjScaleEdge}>150%</Text>
+                </View>
+                <Slider
+                  style={[styles.adminSlider, adminRiderCfg.fareFreeEnabled === true && styles.adminSliderDisabled]}
+                  minimumValue={50}
+                  maximumValue={150}
+                  step={1}
+                  value={adminFareAdjustmentDraft}
+                  onValueChange={setAdminFareAdjustmentDraft}
+                  onSlidingComplete={(v) => {
+                    if (adminRiderCfg.fareFreeEnabled === true) return;
+                    patchAdminRiderService({ fareAdjustmentPercent: Math.round(Number(v)) });
+                  }}
+                  disabled={adminRiderCfg.fareFreeEnabled === true}
+                  minimumTrackTintColor={fareAdjustmentTrackColor(adminFareAdjustmentDraft)}
+                  maximumTrackTintColor="#e2e8f0"
+                  thumbTintColor={Platform.OS === "ios" ? "#fff" : "#5b21b6"}
+                />
+                <Text style={styles.adminHint}>
+                  Multiplier applies to the calculated fare (including the usual minimum on that total). Final quotes are
+                  not raised back to the minimum after a discount.
+                </Text>
+                <View style={styles.fareAdjPresetsRow}>
+                  {FARE_ADJUSTMENT_PRESETS.map((p) => {
+                    const active = Math.round(adminFareAdjustmentDraft) === p;
+                    const freeOn = adminRiderCfg.fareFreeEnabled === true;
+                    return (
+                      <Pressable
+                        key={p}
+                        style={[
+                          styles.fareAdjChip,
+                          active && styles.fareAdjChipActive,
+                          freeOn && styles.fareAdjChipDisabled,
+                        ]}
+                        disabled={freeOn}
+                        onPress={() => {
+                          setAdminFareAdjustmentDraft(p);
+                          patchAdminRiderService({ fareAdjustmentPercent: p });
+                        }}
+                      >
+                        <Text style={[styles.fareAdjChipText, active && styles.fareAdjChipTextActive]}>{p}%</Text>
+                      </Pressable>
+                    );
+                  })}
+                </View>
+              </View>
             </>
           )}
         </View>
@@ -1182,6 +1326,7 @@ const styles = StyleSheet.create({
   adminTitle: { fontSize: 15, fontWeight: "700", color: "#5b21b6", marginBottom: 10 },
   adminRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 8 },
   adminLabel: { fontSize: 14, fontWeight: "600", color: "#0f172a", flex: 1, marginRight: 8 },
+  adminLabelBlock: { flex: 0, marginRight: 0, marginTop: 14 },
   adminHint: { fontSize: 12, color: "#64748b", marginBottom: 12, lineHeight: 17 },
   adminInput: {
     borderWidth: 1,
@@ -1194,6 +1339,90 @@ const styles = StyleSheet.create({
   },
   adminSaveMsg: { alignSelf: "flex-start", paddingVertical: 8, paddingHorizontal: 12 },
   adminSaveMsgText: { color: "#059669", fontWeight: "700", fontSize: 14 },
+  adminSlider: { width: "100%", height: 40, marginBottom: 4 },
+  adminFreeRidePanel: {
+    marginTop: 16,
+    paddingTop: 14,
+    borderTopWidth: 1,
+    borderTopColor: "#e9d5ff",
+  },
+  adminFreeRideBtn: {
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+    borderRadius: 12,
+    borderWidth: 2,
+    borderColor: "#059669",
+    backgroundColor: "#fff",
+    marginBottom: 8,
+  },
+  adminFreeRideBtnOn: {
+    backgroundColor: "#059669",
+    borderColor: "#047857",
+  },
+  adminFreeRideBtnText: {
+    textAlign: "center",
+    fontSize: 14,
+    fontWeight: "800",
+    color: "#059669",
+  },
+  adminFreeRideBtnTextOn: { color: "#fff" },
+  adminInputMultiline: {
+    borderWidth: 1,
+    borderColor: "#cbd5e1",
+    borderRadius: 10,
+    padding: 12,
+    fontSize: 14,
+    backgroundColor: "#f8fafc",
+    marginBottom: 8,
+    minHeight: 88,
+  },
+  adminSliderDisabled: { opacity: 0.5 },
+  adminFarePanel: {
+    marginTop: 16,
+    paddingTop: 14,
+    borderTopWidth: 1,
+    borderTopColor: "#e9d5ff",
+  },
+  fareAdjSummaryPill: {
+    alignSelf: "flex-start",
+    backgroundColor: "#f5f3ff",
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 20,
+    marginBottom: 10,
+    maxWidth: "100%",
+  },
+  fareAdjSummaryText: { fontSize: 13, fontWeight: "600", color: "#4c1d95", lineHeight: 18 },
+  fareAdjScaleRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: 4,
+    paddingHorizontal: 2,
+  },
+  fareAdjScaleEdge: { fontSize: 11, fontWeight: "600", color: "#64748b" },
+  fareAdjScaleMid: { fontSize: 11, fontWeight: "700", color: "#5b21b6", flex: 1, textAlign: "center" },
+  fareAdjPresetsRow: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
+    marginTop: 12,
+  },
+  fareAdjChip: {
+    paddingVertical: 8,
+    paddingHorizontal: 14,
+    borderRadius: 20,
+    backgroundColor: "#f1f5f9",
+    borderWidth: 1,
+    borderColor: "#e2e8f0",
+  },
+  fareAdjChipActive: {
+    backgroundColor: "#5b21b6",
+    borderColor: "#5b21b6",
+  },
+  fareAdjChipText: { fontSize: 13, fontWeight: "700", color: "#475569" },
+  fareAdjChipTextActive: { color: "#fff" },
+  fareAdjChipDisabled: { opacity: 0.45 },
   listTitle: { fontSize: 22, fontWeight: "700", marginBottom: 8 },
   refresh: { alignSelf: "flex-start", marginBottom: 12 },
   refreshText: { color: "#059669", fontWeight: "600" },

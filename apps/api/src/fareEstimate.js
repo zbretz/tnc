@@ -1,4 +1,5 @@
 import { getDrivingDurationToDestination, getDrivingDurationsOneToMany } from "./googleDistance.js";
+import { getFareQuoteModifiers } from "./models/AppSettings.js";
 import { loadPricingAnchors } from "./pricingAnchors.js";
 
 function fareLog(...args) {
@@ -99,14 +100,20 @@ export async function computeFareEstimate(pickup, dropoff) {
   const adjDrop = anchorExcessUsd(excessDrop);
   const subtotal = tripFare + adjPick + adjDrop;
   const minFare = numEnv("TNC_FARE_MIN_USD", 15);
-  const totalUsd = Math.max(minFare, subtotal);
-  const rounded = Math.round(totalUsd * 100) / 100;
+  const baseTotalUsd = Math.max(minFare, subtotal);
+  const baseRounded = Math.round(baseTotalUsd * 100) / 100;
+  const { fareFreeEnabled, fareAdjustmentPercent } = await getFareQuoteModifiers();
+  const multiplier = fareAdjustmentPercent / 100;
+  const quotedBeforeWaiver = Math.round(baseRounded * multiplier * 100) / 100;
+  const finalTotal = fareFreeEnabled ? 0 : quotedBeforeWaiver;
+  const rounded = Math.round(finalTotal * 100) / 100;
 
   const nominalPickup = anchors[bestPickIdx];
   const nominalDropoff = anchors[bestDropIdx];
 
   const tripPortionRounded = Math.round(tripFare * 100) / 100;
   const floorApplied = subtotal < minFare;
+  const adjustmentApplied = !fareFreeEnabled && fareAdjustmentPercent !== 100;
   fareLog("estimate", {
     inputs: {
       pickup: { lat: pickup.lat, lng: pickup.lng },
@@ -140,6 +147,11 @@ export async function computeFareEstimate(pickup, dropoff) {
       subtotalUsd: Math.round(subtotal * 100) / 100,
       minimumFareUsd: minFare,
       minimumFareApplied: floorApplied,
+      fareAdjustmentPercent,
+      baseCalculatedUsd: baseRounded,
+      adjustmentApplied,
+      fareFree: fareFreeEnabled,
+      waivedQuoteUsd: fareFreeEnabled ? quotedBeforeWaiver : undefined,
       totalUsd: rounded,
     },
   });
@@ -173,6 +185,10 @@ export async function computeFareEstimate(pickup, dropoff) {
           adjustmentUsd: Math.round(adjDrop * 100) / 100,
         },
         minimumFareUsd: minFare,
+        fareAdjustmentPercent,
+        baseCalculatedUsd: baseRounded,
+        fareFree: fareFreeEnabled,
+        waivedQuoteUsd: fareFreeEnabled ? quotedBeforeWaiver : undefined,
       },
       computedAt: new Date().toISOString(),
     },
