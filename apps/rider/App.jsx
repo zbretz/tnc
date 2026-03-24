@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
+  Image,
   Platform,
   Pressable,
   StyleSheet,
@@ -9,7 +10,6 @@ import {
   TextInput,
   View,
 } from "react-native";
-import { MaterialIcons } from "@expo/vector-icons";
 import MapView, { Marker, PROVIDER_GOOGLE } from "react-native-maps";
 import LottieView from "lottie-react-native";
 import * as Location from "expo-location";
@@ -141,11 +141,14 @@ export default function App() {
   const [dropoff, setDropoff] = useState(null);
   const [pickupAddressLabel, setPickupAddressLabel] = useState(null);
   const [dropoffAddressLabel, setDropoffAddressLabel] = useState(null);
+  const [pickupQuery, setPickupQuery] = useState("");
   const [dropoffQuery, setDropoffQuery] = useState("");
+  const [resolvingPickup, setResolvingPickup] = useState(false);
   const [resolvingDropoff, setResolvingDropoff] = useState(false);
-  const [enterDropoffAddress, setEnterDropoffAddress] = useState(false);
-  /** Which pin map taps update before a trip is created. */
-  const [pinMode, setPinMode] = useState("pickup");
+  /** Planning: step 1 = pickup, step 2 = dropoff. */
+  const [bookingStep, setBookingStep] = useState("pickup");
+  /** For the active step: place pin on map or resolve typed address. */
+  const [planEntryMode, setPlanEntryMode] = useState("map");
   const [trip, setTrip] = useState(null);
   const [driverLive, setDriverLive] = useState(null);
   const socketRef = useRef(null);
@@ -175,7 +178,13 @@ export default function App() {
           setDriverLive(null);
           return;
         }
-        setTrip(msg.trip);
+        setTrip((prev) => {
+          const next = msg.trip;
+          if (!prev || String(prev._id) !== String(next._id)) return next;
+          const merged = { ...prev, ...next };
+          if (prev.driverProfile && !next.driverProfile) merged.driverProfile = prev.driverProfile;
+          return merged;
+        });
         if (msg.trip.driverLocation) {
           setDriverLive({
             lat: msg.trip.driverLocation.lat,
@@ -267,7 +276,8 @@ export default function App() {
         const c = { lat: loc.coords.latitude, lng: loc.coords.longitude };
         setPickup(c);
         setPickupAddressLabel(null);
-        setPinMode("pickup");
+        setBookingStep("pickup");
+        setPlanEntryMode("map");
         requestAnimationFrame(() => {
           if (!cancelled) animateMapToPoint(c);
         });
@@ -289,9 +299,10 @@ export default function App() {
     setDropoff(null);
     setPickupAddressLabel(null);
     setDropoffAddressLabel(null);
+    setPickupQuery("");
     setDropoffQuery("");
-    setEnterDropoffAddress(false);
-    setPinMode("pickup");
+    setBookingStep("pickup");
+    setPlanEntryMode("map");
     socketRef.current?.disconnect();
   };
 
@@ -303,10 +314,14 @@ export default function App() {
     }
     const loc = await Location.getCurrentPositionAsync({});
     const c = { lat: loc.coords.latitude, lng: loc.coords.longitude };
-    if (pinMode === "pickup") {
+    if (trip) {
+      animateMapToPoint(c);
+      return;
+    }
+    if (bookingStep === "pickup") {
       setPickup(c);
       setPickupAddressLabel(null);
-    } else if (!enterDropoffAddress) {
+    } else {
       setDropoff(c);
       setDropoffAddressLabel(null);
     }
@@ -380,6 +395,40 @@ export default function App() {
   const shownPickupAddress = trip?.pickupAddress || pickupAddressLabel;
   const shownDropoffAddress = trip?.dropoffAddress || dropoffAddressLabel;
 
+  const setPickupFromAddress = async () => {
+    const q = pickupQuery.trim();
+    if (!q) {
+      Alert.alert("Pickup address", "Enter a pickup address first.");
+      return;
+    }
+    setResolvingPickup(true);
+    try {
+      const out = await geocodeAddressToPoint(q);
+      if (!out?.point) {
+        Alert.alert(
+          "Pickup address",
+          getGoogleGeocodingApiKey()
+            ? "Could not find that address."
+            : "Add EXPO_PUBLIC_GOOGLE_GEOCODING_API_KEY to geocode addresses."
+        );
+        return;
+      }
+      setPickup(out.point);
+      setPickupAddressLabel(out.address || q);
+      mapRef.current?.animateToRegion(
+        {
+          latitude: out.point.lat,
+          longitude: out.point.lng,
+          latitudeDelta: 0.03,
+          longitudeDelta: 0.03,
+        },
+        450
+      );
+    } finally {
+      setResolvingPickup(false);
+    }
+  };
+
   const setDropoffFromAddress = async () => {
     const q = dropoffQuery.trim();
     if (!q) {
@@ -390,13 +439,16 @@ export default function App() {
     try {
       const out = await geocodeAddressToPoint(q);
       if (!out?.point) {
-        Alert.alert("Dropoff address", "Could not find that address.");
+        Alert.alert(
+          "Dropoff address",
+          getGoogleGeocodingApiKey()
+            ? "Could not find that address."
+            : "Add EXPO_PUBLIC_GOOGLE_GEOCODING_API_KEY to geocode addresses."
+        );
         return;
       }
       setDropoff(out.point);
       setDropoffAddressLabel(out.address || q);
-      setPinMode("dropoff");
-      setEnterDropoffAddress(true);
       mapRef.current?.animateToRegion(
         {
           latitude: out.point.lat,
@@ -435,9 +487,45 @@ export default function App() {
     };
   }, [dropoff?.lat, dropoff?.lng, dropoffAddressLabel, trip?._id]);
 
+  const driverCoord =
+    driverLive ||
+    (trip?.driverLocation
+      ? { lat: trip.driverLocation.lat, lng: trip.driverLocation.lng }
+      : null);
+
   const region = useMemo(() => {
     const p = displayPickup || { lat: 37.78, lng: -122.4 };
     const d = displayDropoff;
+    const planningPickupOnly = !trip && bookingStep === "pickup";
+    if (planningPickupOnly) {
+      return {
+        latitude: p.lat,
+        longitude: p.lng,
+        latitudeDelta: 0.08,
+        longitudeDelta: 0.08,
+      };
+    }
+
+    const spanAB = (a, b) =>
+      Math.max(Math.abs(a.lat - b.lat), Math.abs(a.lng - b.lng), 0.02) * 1.4;
+
+    if (trip && driverCoord && trip.status === "accepted") {
+      return {
+        latitude: (p.lat + driverCoord.lat) / 2,
+        longitude: (p.lng + driverCoord.lng) / 2,
+        latitudeDelta: spanAB(p, driverCoord),
+        longitudeDelta: spanAB(p, driverCoord),
+      };
+    }
+    if (trip && driverCoord && trip.status === "in_progress" && d) {
+      return {
+        latitude: (d.lat + driverCoord.lat) / 2,
+        longitude: (d.lng + driverCoord.lng) / 2,
+        latitudeDelta: spanAB(d, driverCoord),
+        longitudeDelta: spanAB(d, driverCoord),
+      };
+    }
+
     if (d && p) {
       const midLat = (p.lat + d.lat) / 2;
       const midLng = (p.lng + d.lng) / 2;
@@ -455,26 +543,22 @@ export default function App() {
       latitudeDelta: 0.08,
       longitudeDelta: 0.08,
     };
-  }, [displayPickup, displayDropoff]);
+  }, [displayPickup, displayDropoff, trip, bookingStep, driverCoord?.lat, driverCoord?.lng]);
 
-  const driverCoord =
-    driverLive ||
-    (trip?.driverLocation
-      ? { lat: trip.driverLocation.lat, lng: trip.driverLocation.lng }
-      : null);
-
-  /** Frame pickup + driver in the map when the trip is active and both positions exist. */
+  /** accepted: pickup + driver (omit dropoff from camera). in_progress: dropoff + driver. */
   useEffect(() => {
-    if (!trip || !displayPickup) return;
+    if (!trip || !driverCoord) return;
     if (!["accepted", "in_progress"].includes(trip.status)) return;
-    if (!driverCoord) return;
 
-    const coords = [
-      { latitude: displayPickup.lat, longitude: displayPickup.lng },
-      { latitude: driverCoord.lat, longitude: driverCoord.lng },
-    ];
-    if (displayDropoff) {
+    const coords = [];
+    if (trip.status === "in_progress") {
+      if (!displayDropoff) return;
       coords.push({ latitude: displayDropoff.lat, longitude: displayDropoff.lng });
+      coords.push({ latitude: driverCoord.lat, longitude: driverCoord.lng });
+    } else {
+      if (!displayPickup) return;
+      coords.push({ latitude: displayPickup.lat, longitude: displayPickup.lng });
+      coords.push({ latitude: driverCoord.lat, longitude: driverCoord.lng });
     }
 
     const t = setTimeout(() => {
@@ -538,12 +622,13 @@ export default function App() {
         provider={PROVIDER_GOOGLE}
         initialRegion={region}
         onPress={(e) => {
+          if (trip) return;
           const { latitude, longitude } = e.nativeEvent.coordinate;
           const c = { lat: latitude, lng: longitude };
-          if (pinMode === "pickup") {
+          if (bookingStep === "pickup") {
             setPickup(c);
             setPickupAddressLabel(null);
-          } else if (!enterDropoffAddress) {
+          } else {
             setDropoff(c);
             setDropoffAddressLabel(null);
           }
@@ -553,14 +638,16 @@ export default function App() {
           <Marker
             coordinate={{ latitude: displayPickup.lat, longitude: displayPickup.lng }}
             title="Pickup"
-            pinColor="dodgerblue"
+            anchor={{ x: 0.5, y: 0.5 }}
+            image={require("./assets/pickup-marker.png")}
           />
         ) : null}
-        {displayDropoff ? (
+        {displayDropoff && (trip || bookingStep === "dropoff") ? (
           <Marker
             coordinate={{ latitude: displayDropoff.lat, longitude: displayDropoff.lng }}
             title="Dropoff"
-            pinColor="purple"
+            anchor={{ x: 0.5, y: 0.5 }}
+            image={require("./assets/dropoff-marker.png")}
           />
         ) : null}
         {driverCoord && trip && trip.status !== "requested" ? (
@@ -568,12 +655,8 @@ export default function App() {
             coordinate={{ latitude: driverCoord.lat, longitude: driverCoord.lng }}
             title="Driver"
             anchor={{ x: 0.5, y: 0.5 }}
-            tracksViewChanges={false}
-          >
-            <View style={styles.driverCarMarker}>
-              <MaterialIcons name="directions-car" size={26} color="#ffffff" />
-            </View>
-          </Marker>
+            image={require("./assets/driver-marker.png")}
+          />
         ) : null}
       </MapView>
 
@@ -598,109 +681,194 @@ export default function App() {
       ) : null}
 
       <View style={styles.overlay}>
-        <Text style={styles.banner}>
-          {!trip
-            ? `Pickup defaults to your location. Tap the map to move pins (blue = pickup, purple = dropoff). Dropoff is optional.`
-            : trip.status === "requested"
-              ? "Your request is live. You can still cancel below if plans change."
-              : trip.status === "accepted" || trip.status === "in_progress"
-                ? `Driver accepted — car icon is the driver.${
-                    trip?.etaToPickup
-                      ? `\nDriver ETA to pickup: ${trip.etaToPickup.durationText || `~${trip.etaToPickup.summaryMinutes} min`}${trip.etaToPickup.distanceText ? ` · ${trip.etaToPickup.distanceText}` : ""}${trip.etaToPickup.usesTraffic ? " (traffic)" : ""}`
-                      : driverCoord
-                        ? "\nDriver ETA to pickup: updating…"
-                        : "\nWaiting for driver location…"
-                  }`
-                : `Trip: ${trip.status}`}
-        </Text>
         {!trip ? (
-          <View style={styles.modeRow}>
-            <Pressable
-              style={[styles.modeBtn, pinMode === "pickup" && styles.modeBtnActive]}
-              onPress={() => setPinMode("pickup")}
-            >
-              <Text style={[styles.modeBtnText, pinMode === "pickup" && styles.modeBtnTextActive]}>Pickup</Text>
-            </Pressable>
-            <Pressable
-              style={[styles.modeBtn, pinMode === "dropoff" && !enterDropoffAddress && styles.modeBtnActive]}
-              onPress={() => {
-                setPinMode("dropoff");
-                setEnterDropoffAddress(false);
-              }}
-            >
-              <Text style={[styles.modeBtnText, pinMode === "dropoff" && !enterDropoffAddress && styles.modeBtnTextActive]}>
-                Dropoff on map
-              </Text>
-            </Pressable>
-            <Pressable
-              style={[styles.modeBtn, pinMode === "dropoff" && enterDropoffAddress && styles.modeBtnActive]}
-              onPress={() => {
-                setPinMode("dropoff");
-                setEnterDropoffAddress(true);
-              }}
-            >
-              <Text style={[styles.modeBtnText, pinMode === "dropoff" && enterDropoffAddress && styles.modeBtnTextActive]}>
-                Enter address
-              </Text>
-            </Pressable>
-            {dropoff ? (
+          <>
+            <View style={styles.stepRow}>
+              <View style={[styles.stepChip, bookingStep === "pickup" && styles.stepChipActive]}>
+                <Text style={[styles.stepChipNum, bookingStep === "pickup" && styles.stepChipOnPrimary]}>1</Text>
+                <Text style={[styles.stepChipLabel, bookingStep === "pickup" && styles.stepChipLabelActive]}>Pickup</Text>
+              </View>
+              <View style={styles.stepConnector} />
+              <View style={[styles.stepChip, bookingStep === "dropoff" && styles.stepChipActive]}>
+                <Text style={[styles.stepChipNum, bookingStep === "dropoff" && styles.stepChipOnPrimary]}>2</Text>
+                <Text style={[styles.stepChipLabel, bookingStep === "dropoff" && styles.stepChipLabelActive]}>Dropoff</Text>
+              </View>
+            </View>
+            <Text style={styles.banner}>
+              {bookingStep === "pickup"
+                ? "Step 1 — Set your pickup on the map, use My location, or type an address."
+                : "Step 2 — Set your dropoff the same way, then request your ride."}
+            </Text>
+            <View style={styles.modeRow}>
               <Pressable
-                style={styles.modeBtn}
-                onPress={() => {
-                  setDropoff(null);
-                  setDropoffAddressLabel(null);
-                  setDropoffQuery("");
-                  setEnterDropoffAddress(false);
-                }}
+                style={[styles.modeBtn, planEntryMode === "map" && styles.modeBtnActive]}
+                onPress={() => setPlanEntryMode("map")}
               >
-                <Text style={styles.modeBtnText}>Clear dropoff</Text>
+                <Text style={[styles.modeBtnText, planEntryMode === "map" && styles.modeBtnTextActive]}>Map</Text>
               </Pressable>
-            ) : null}
-          </View>
-        ) : null}
-        {!trip ? (
-          <View style={styles.addrBox}>
-            <Text style={styles.addrText}>Pickup: {shownPickupAddress || (displayPickup ? "Locating address..." : "Not set")}</Text>
-            <Text style={styles.addrText}>Dropoff: {shownDropoffAddress || (displayDropoff ? "Locating address..." : "Not set")}</Text>
-            {enterDropoffAddress ? (
-              <>
-                <TextInput
-                  style={styles.addrInput}
-                  placeholder="Type dropoff address"
-                  value={dropoffQuery}
-                  onChangeText={setDropoffQuery}
-                  autoCapitalize="words"
-                  returnKeyType="search"
-                  onSubmitEditing={setDropoffFromAddress}
-                />
-                <Pressable
-                  style={[styles.smallBtn, styles.primarySmall]}
-                  onPress={setDropoffFromAddress}
-                  disabled={busy || resolvingDropoff}
-                >
-                  <Text style={[styles.smallBtnText, styles.smallBtnTextOnPrimary]}>
-                    {resolvingDropoff ? "Finding..." : "Set dropoff from address"}
+              <Pressable
+                style={[styles.modeBtn, planEntryMode === "address" && styles.modeBtnActive]}
+                onPress={() => setPlanEntryMode("address")}
+              >
+                <Text style={[styles.modeBtnText, planEntryMode === "address" && styles.modeBtnTextActive]}>Address</Text>
+              </Pressable>
+            </View>
+            <View style={styles.addrBox}>
+              {bookingStep === "pickup" ? (
+                <>
+                  <Text style={styles.addrText}>
+                    Pickup: {shownPickupAddress || (displayPickup ? "Locating address…" : "Not set yet")}
                   </Text>
-                </Pressable>
-              </>
-            ) : null}
-          </View>
+                  {planEntryMode === "address" ? (
+                    <>
+                      <TextInput
+                        style={styles.addrInput}
+                        placeholder="Street, neighborhood, or place"
+                        value={pickupQuery}
+                        onChangeText={setPickupQuery}
+                        autoCapitalize="words"
+                        returnKeyType="search"
+                        onSubmitEditing={setPickupFromAddress}
+                      />
+                      <Pressable
+                        style={[styles.smallBtn, styles.primarySmall]}
+                        onPress={setPickupFromAddress}
+                        disabled={busy || resolvingPickup}
+                      >
+                        <Text style={[styles.smallBtnText, styles.smallBtnTextOnPrimary]}>
+                          {resolvingPickup ? "Finding…" : "Use this address"}
+                        </Text>
+                      </Pressable>
+                    </>
+                  ) : null}
+                </>
+              ) : (
+                <>
+                  <Text style={styles.addrText}>Pickup: {shownPickupAddress || "—"}</Text>
+                  <Text style={styles.addrText}>
+                    Dropoff: {shownDropoffAddress || (displayDropoff ? "Locating address…" : "Not set yet")}
+                  </Text>
+                  {planEntryMode === "address" ? (
+                    <>
+                      <TextInput
+                        style={styles.addrInput}
+                        placeholder="Street, neighborhood, or place"
+                        value={dropoffQuery}
+                        onChangeText={setDropoffQuery}
+                        autoCapitalize="words"
+                        returnKeyType="search"
+                        onSubmitEditing={setDropoffFromAddress}
+                      />
+                      <Pressable
+                        style={[styles.smallBtn, styles.primarySmall]}
+                        onPress={setDropoffFromAddress}
+                        disabled={busy || resolvingDropoff}
+                      >
+                        <Text style={[styles.smallBtnText, styles.smallBtnTextOnPrimary]}>
+                          {resolvingDropoff ? "Finding…" : "Use this address"}
+                        </Text>
+                      </Pressable>
+                    </>
+                  ) : null}
+                  {displayDropoff ? (
+                    <Pressable
+                      style={styles.smallBtn}
+                      onPress={() => {
+                        setDropoff(null);
+                        setDropoffAddressLabel(null);
+                        setDropoffQuery("");
+                      }}
+                    >
+                      <Text style={styles.smallBtnText}>Clear dropoff</Text>
+                    </Pressable>
+                  ) : null}
+                </>
+              )}
+            </View>
+          </>
         ) : (
-          <View style={styles.addrBox}>
-            <Text style={styles.addrText}>Pickup: {trip?.pickupAddress || "Not available"}</Text>
-            <Text style={styles.addrText}>Dropoff: {trip?.dropoffAddress || "Not set"}</Text>
-          </View>
+          <>
+            <Text style={styles.banner}>
+              {trip.status === "requested"
+                ? "Your request is live. You can still cancel below if plans change."
+                : trip.status === "accepted" || trip.status === "in_progress"
+                  ? `Driver accepted — person = pickup, flag = dropoff, car = driver.${
+                      trip?.etaToPickup
+                        ? `\nDriver ETA to pickup: ${trip.etaToPickup.durationText || `~${trip.etaToPickup.summaryMinutes} min`}${trip.etaToPickup.distanceText ? ` · ${trip.etaToPickup.distanceText}` : ""}${trip.etaToPickup.usesTraffic ? " (traffic)" : ""}`
+                        : driverCoord
+                          ? "\nDriver ETA to pickup: updating…"
+                          : "\nWaiting for driver location…"
+                    }`
+                  : `Trip: ${trip.status}`}
+            </Text>
+            {(trip.status === "accepted" || trip.status === "in_progress") && trip.driverProfile ? (
+              <View style={styles.driverCard}>
+                {typeof trip.driverProfile.avatarUrl === "string" &&
+                (trip.driverProfile.avatarUrl.startsWith("http") || trip.driverProfile.avatarUrl.startsWith("data:")) ? (
+                  <Image source={{ uri: trip.driverProfile.avatarUrl }} style={styles.driverAvatarImg} />
+                ) : (
+                  <View style={[styles.driverAvatarImg, styles.driverAvatarPlaceholder]} />
+                )}
+                <View style={styles.driverCardBody}>
+                  <Text style={styles.driverCardName}>
+                    {trip.driverProfile.firstName}
+                    {trip.driverProfile.lastInitial ? ` ${trip.driverProfile.lastInitial}` : ""}
+                  </Text>
+                  {trip.driverProfile.vehicle &&
+                  (trip.driverProfile.vehicle.make ||
+                    trip.driverProfile.vehicle.model ||
+                    trip.driverProfile.vehicle.color) ? (
+                    <Text style={styles.driverCardMeta} numberOfLines={2}>
+                      {[trip.driverProfile.vehicle.color, trip.driverProfile.vehicle.make, trip.driverProfile.vehicle.model]
+                        .filter(Boolean)
+                        .join(" · ")}
+                    </Text>
+                  ) : null}
+                  {trip.driverProfile.vehicle?.licensePlate ? (
+                    <Text style={styles.driverCardMeta}>{trip.driverProfile.vehicle.licensePlate}</Text>
+                  ) : null}
+                </View>
+                {typeof trip.driverProfile.vehicle?.photoUrl === "string" &&
+                (trip.driverProfile.vehicle.photoUrl.startsWith("http") ||
+                  trip.driverProfile.vehicle.photoUrl.startsWith("data:")) ? (
+                  <Image source={{ uri: trip.driverProfile.vehicle.photoUrl }} style={styles.vehicleThumb} />
+                ) : null}
+              </View>
+            ) : null}
+            <View style={styles.addrBox}>
+              <Text style={styles.addrText}>Pickup: {trip?.pickupAddress || "Not available"}</Text>
+              <Text style={styles.addrText}>Dropoff: {trip?.dropoffAddress || "Not set"}</Text>
+            </View>
+          </>
         )}
         <View style={styles.row}>
           <Pressable style={styles.smallBtn} onPress={centerOnMe}>
             <Text style={styles.smallBtnText}>My location</Text>
           </Pressable>
-          {(!trip || trip.status === "cancelled" || trip.status === "completed") && pickup && dropoff ? (
+          {!trip && bookingStep === "pickup" && pickup ? (
             <Pressable
               style={[styles.smallBtn, styles.primarySmall]}
-              onPress={requestRide}
-              disabled={busy}
+              onPress={() => {
+                setBookingStep("dropoff");
+                setPlanEntryMode("map");
+              }}
             >
+              <Text style={[styles.smallBtnText, styles.smallBtnTextOnPrimary]}>Continue to dropoff</Text>
+            </Pressable>
+          ) : null}
+          {!trip && bookingStep === "dropoff" ? (
+            <Pressable
+              style={styles.smallBtn}
+              onPress={() => {
+                setBookingStep("pickup");
+                setPlanEntryMode("map");
+              }}
+            >
+              <Text style={styles.smallBtnText}>Back</Text>
+            </Pressable>
+          ) : null}
+          {!trip && bookingStep === "dropoff" && pickup && dropoff ? (
+            <Pressable style={[styles.smallBtn, styles.primarySmall]} onPress={requestRide} disabled={busy}>
               <Text style={[styles.smallBtnText, styles.smallBtnTextOnPrimary]}>Request ride</Text>
             </Pressable>
           ) : null}
@@ -763,21 +931,6 @@ const styles = StyleSheet.create({
     marginTop: 8,
     marginBottom: 12,
   },
-  driverCarMarker: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
-    backgroundColor: "#059669",
-    borderWidth: 3,
-    borderColor: "#fff",
-    justifyContent: "center",
-    alignItems: "center",
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.28,
-    shadowRadius: 4,
-    elevation: 5,
-  },
   auth: {
     flex: 1,
     padding: 24,
@@ -810,12 +963,86 @@ const styles = StyleSheet.create({
     bottom: 36,
     gap: 10,
   },
+  stepRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 10,
+  },
+  stepChip: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 12,
+    backgroundColor: "rgba(255,255,255,0.95)",
+    borderWidth: 1,
+    borderColor: "#e2e8f0",
+  },
+  stepChipActive: {
+    backgroundColor: "#2563eb",
+    borderColor: "#1d4ed8",
+  },
+  stepChipNum: {
+    fontSize: 14,
+    fontWeight: "800",
+    color: "#94a3b8",
+    minWidth: 20,
+    textAlign: "center",
+  },
+  stepChipOnPrimary: {
+    color: "#fff",
+  },
+  stepChipLabel: {
+    fontSize: 14,
+    fontWeight: "600",
+    color: "#64748b",
+  },
+  stepChipLabelActive: {
+    color: "#fff",
+  },
+  stepConnector: {
+    width: 24,
+    height: 3,
+    backgroundColor: "#cbd5e1",
+    borderRadius: 2,
+  },
   banner: {
     backgroundColor: "rgba(255,255,255,0.95)",
     padding: 12,
     borderRadius: 12,
     fontSize: 15,
     overflow: "hidden",
+  },
+  driverCard: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    backgroundColor: "rgba(255,255,255,0.97)",
+    padding: 12,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: "#e2e8f0",
+  },
+  driverAvatarImg: {
+    width: 52,
+    height: 52,
+    borderRadius: 26,
+    backgroundColor: "#e2e8f0",
+  },
+  driverAvatarPlaceholder: {
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  driverCardBody: { flex: 1, minWidth: 0 },
+  driverCardName: { fontSize: 17, fontWeight: "700", color: "#0f172a" },
+  driverCardMeta: { fontSize: 13, color: "#64748b", marginTop: 2 },
+  vehicleThumb: {
+    width: 56,
+    height: 56,
+    borderRadius: 8,
+    backgroundColor: "#f1f5f9",
   },
   row: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
   addrBox: {

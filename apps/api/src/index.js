@@ -10,6 +10,7 @@ import { createTripsRouter } from "./routes/trips.js";
 import { verifyToken } from "./middleware/auth.js";
 import { serializeTrip } from "./serialize.js";
 import { tryRefreshPickupEta } from "./pickupEta.js";
+import { seedDevDriversIfNeeded } from "./seedDevDrivers.js";
 
 const PORT = Number(process.env.PORT) || 3000;
 // const MONGODB_URI = process.env.MONGODB_URI || "mongodb://127.0.0.1:27017/tnc";
@@ -101,7 +102,10 @@ io.on("connection", (socket) => {
     trip.driverLocation = { lat, lng, updatedAt: now };
     await trip.save();
     await tryRefreshPickupEta(trip, lat, lng);
-    const serialized = serializeTrip(trip);
+    const fresh = await Trip.findById(tripId)
+      .populate({ path: "driver", select: "-passwordHash" })
+      .exec();
+    const serialized = fresh ? serializeTrip(fresh) : serializeTrip(trip);
     emitTripRoom(tripId, "driver:location", {
       lat,
       lng,
@@ -111,7 +115,10 @@ io.on("connection", (socket) => {
   });
 });
 
-mongoose.connect(MONGODB_URI).then(() => {
+mongoose.connect(MONGODB_URI).then(async () => {
+  if (process.env.TNC_DEV_AUTH === "1") {
+    await seedDevDriversIfNeeded().catch((e) => console.error("[tnc] seedDevDriversIfNeeded", e));
+  }
   httpServer.listen(PORT, () => {
     console.log(`API + Socket.io http://10.0.0.135:${PORT}`);
   });

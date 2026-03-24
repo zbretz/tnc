@@ -5,6 +5,13 @@ import { authMiddleware, requireRole } from "../middleware/auth.js";
 import { serializeTrip } from "../serialize.js";
 import { clearPickupEtaThrottle, tryRefreshPickupEta } from "../pickupEta.js";
 
+const POPULATE_DRIVER = { path: "driver", select: "-passwordHash" };
+
+async function loadTripSerialized(id) {
+  const t = await Trip.findById(id).populate(POPULATE_DRIVER).exec();
+  return t ? serializeTrip(t) : null;
+}
+
 /** Coerce JSON numbers that may arrive as strings; return null if invalid. */
 function parseLatLng(obj) {
   if (obj == null || typeof obj !== "object") return null;
@@ -21,6 +28,11 @@ function parseAddress(value) {
   return out.slice(0, 240);
 }
 
+function tripDriverIdString(trip) {
+  if (!trip?.driver) return "";
+  return String(trip.driver._id ?? trip.driver);
+}
+
 export function createTripsRouter(deps) {
   const r = Router();
 
@@ -29,14 +41,14 @@ export function createTripsRouter(deps) {
       res.status(400).json({ error: "Invalid id" });
       return;
     }
-    const trip = await Trip.findById(id).exec();
+    const trip = await Trip.findById(id).populate(POPULATE_DRIVER).exec();
     if (!trip) {
       res.status(404).json({ error: "Not found" });
       return;
     }
     const uid = String(req.userId || "");
     const isRider = String(trip.rider) === uid;
-    const isDriver = trip.driver != null && String(trip.driver) === uid;
+    const isDriver = trip.driver != null && tripDriverIdString(trip) === uid;
     if (["completed", "cancelled"].includes(trip.status)) {
       if (!isRider && !isDriver) {
         res.status(403).json({ error: "Forbidden" });
@@ -63,7 +75,7 @@ export function createTripsRouter(deps) {
     trip.etaToPickup = null;
     clearPickupEtaThrottle(id);
     await trip.save();
-    const out = serializeTrip(trip);
+    const out = await loadTripSerialized(id);
     deps.onTripUpdated(out);
     res.json({ trip: out });
   }
@@ -129,7 +141,8 @@ export function createTripsRouter(deps) {
       res.status(409).json({ error: "Trip not available" });
       return;
     }
-    const out = serializeTrip(updated);
+    const populated = await Trip.findById(updated._id).populate(POPULATE_DRIVER).exec();
+    const out = serializeTrip(populated);
     deps.onTripUpdated(out);
     res.json({ trip: out });
   });
@@ -145,6 +158,30 @@ export function createTripsRouter(deps) {
     }
   });
 
+  r.post("/:id/start-ride", authMiddleware, requireRole("driver"), async (req, res) => {
+    const id = req.params.id;
+    if (!mongoose.isValidObjectId(id)) {
+      res.status(400).json({ error: "Invalid id" });
+      return;
+    }
+    const trip = await Trip.findById(id).exec();
+    if (!trip || tripDriverIdString(trip) !== req.userId) {
+      res.status(403).json({ error: "Forbidden" });
+      return;
+    }
+    if (trip.status !== "accepted") {
+      res.status(400).json({ error: "Trip must be accepted" });
+      return;
+    }
+    trip.status = "in_progress";
+    trip.etaToPickup = null;
+    clearPickupEtaThrottle(id);
+    await trip.save();
+    const out = await loadTripSerialized(id);
+    deps.onTripUpdated(out);
+    res.json({ trip: out });
+  });
+
   r.post("/:id/complete", authMiddleware, requireRole("driver"), async (req, res) => {
     const id = req.params.id;
     if (!mongoose.isValidObjectId(id)) {
@@ -152,7 +189,7 @@ export function createTripsRouter(deps) {
       return;
     }
     const trip = await Trip.findById(id).exec();
-    if (!trip || String(trip.driver) !== req.userId) {
+    if (!trip || tripDriverIdString(trip) !== req.userId) {
       res.status(403).json({ error: "Forbidden" });
       return;
     }
@@ -164,7 +201,7 @@ export function createTripsRouter(deps) {
     trip.etaToPickup = null;
     clearPickupEtaThrottle(id);
     await trip.save();
-    const out = serializeTrip(trip);
+    const out = await loadTripSerialized(id);
     deps.onTripUpdated(out);
     res.json({ trip: out });
   });
@@ -181,7 +218,7 @@ export function createTripsRouter(deps) {
       return;
     }
     const trip = await Trip.findById(id).exec();
-    if (!trip || String(trip.driver) !== req.userId) {
+    if (!trip || tripDriverIdString(trip) !== req.userId) {
       res.status(403).json({ error: "Forbidden" });
       return;
     }
@@ -193,7 +230,7 @@ export function createTripsRouter(deps) {
     trip.driverLocation = { lat, lng, updatedAt: now };
     await trip.save();
     await tryRefreshPickupEta(trip, lat, lng);
-    const out = serializeTrip(trip);
+    const out = await loadTripSerialized(id);
     deps.onDriverLocation?.(id, {
       lat,
       lng,
@@ -209,13 +246,13 @@ export function createTripsRouter(deps) {
       res.status(400).json({ error: "Invalid id" });
       return;
     }
-    const trip = await Trip.findById(id).exec();
+    const trip = await Trip.findById(id).populate(POPULATE_DRIVER).exec();
     if (!trip) {
       res.status(404).json({ error: "Not found" });
       return;
     }
     const riderOk = String(trip.rider) === req.userId;
-    const driverOk = trip.driver && String(trip.driver) === req.userId;
+    const driverOk = trip.driver && tripDriverIdString(trip) === req.userId;
     if (!riderOk && !driverOk) {
       res.status(403).json({ error: "Forbidden" });
       return;

@@ -64,7 +64,7 @@ export function buildEtaPayloadFromMatrix(result) {
  */
 export async function tryRefreshPickupEta(trip, driverLat, driverLng) {
   const tripId = String(trip._id);
-  if (!["accepted", "in_progress"].includes(trip.status)) {
+  if (trip.status !== "accepted") {
     return { refreshed: false, skipped: "status" };
   }
   const pickup = trip.pickup;

@@ -1,3 +1,79 @@
+function trimOrEmpty(s) {
+  return typeof s === "string" ? s.trim() : "";
+}
+
+function lastInitialFrom(lastName, fallbackName) {
+  const last = trimOrEmpty(lastName);
+  if (last.length > 0) return `${last[0].toUpperCase()}.`;
+  const parts = trimOrEmpty(fallbackName).split(/\s+/).filter(Boolean);
+  if (parts.length > 0) {
+    const token = parts[parts.length - 1];
+    if (token.length > 0) return `${token[0].toUpperCase()}.`;
+  }
+  return "";
+}
+
+/** Rider-facing driver card (no private fields). */
+export function serializeDriverPublic(user) {
+  if (!user || user.role !== "driver") return undefined;
+  const firstFromName = trimOrEmpty(user.name).split(/\s+/)[0] || "";
+  const firstName = trimOrEmpty(user.firstName) || firstFromName || "Driver";
+  const lastInitial = lastInitialFrom(user.lastName, user.name);
+  const v = user.vehicle && typeof user.vehicle === "object" ? user.vehicle : {};
+  const vehicle = {
+    ...(trimOrEmpty(v.make) ? { make: trimOrEmpty(v.make) } : {}),
+    ...(trimOrEmpty(v.model) ? { model: trimOrEmpty(v.model) } : {}),
+    ...(trimOrEmpty(v.color) ? { color: trimOrEmpty(v.color) } : {}),
+    ...(trimOrEmpty(v.licensePlate) ? { licensePlate: trimOrEmpty(v.licensePlate) } : {}),
+    ...(trimOrEmpty(v.photoUrl) ? { photoUrl: trimOrEmpty(v.photoUrl) } : {}),
+  };
+  return {
+    firstName,
+    lastInitial,
+    ...(trimOrEmpty(user.avatarUrl) ? { avatarUrl: trimOrEmpty(user.avatarUrl) } : {}),
+    ...(Object.keys(vehicle).length > 0 ? { vehicle } : {}),
+  };
+}
+
+/** Current user for GET /auth/me (no password hash). */
+export function serializeUserMe(user) {
+  if (!user) return null;
+  const base = {
+    _id: String(user._id),
+    email: user.email,
+    name: user.name,
+    role: user.role,
+    firstName: trimOrEmpty(user.firstName),
+    lastName: trimOrEmpty(user.lastName),
+    avatarUrl: trimOrEmpty(user.avatarUrl),
+    vehicle:
+      user.vehicle && typeof user.vehicle === "object"
+        ? {
+            make: trimOrEmpty(user.vehicle.make),
+            model: trimOrEmpty(user.vehicle.model),
+            color: trimOrEmpty(user.vehicle.color),
+            licensePlate: trimOrEmpty(user.vehicle.licensePlate),
+            photoUrl: trimOrEmpty(user.vehicle.photoUrl),
+          }
+        : {},
+    createdAt: user.createdAt?.toISOString?.(),
+    updatedAt: user.updatedAt?.toISOString?.(),
+  };
+  if (user.role === "driver") {
+    base.driverPublic = serializeDriverPublic(user);
+  }
+  return base;
+}
+
+function driverIdFromTrip(t) {
+  if (!t?.driver) return undefined;
+  return String(t.driver._id ?? t.driver);
+}
+
+function isPopulatedDriver(driver) {
+  return driver != null && typeof driver === "object" && driver._id != null && driver.role === "driver";
+}
+
 /** Plain { lat, lng } for JSON (Mongoose subdocs / odd shapes safe). */
 function pickLatLng(p) {
   if (p == null || typeof p !== "object") return undefined;
@@ -10,10 +86,12 @@ function pickLatLng(p) {
 export function serializeTrip(t) {
   const pickup = pickLatLng(t.pickup);
   const dropoff = pickLatLng(t.dropoff);
+  const driverProfile = isPopulatedDriver(t.driver) ? serializeDriverPublic(t.driver) : undefined;
   return {
     _id: String(t._id),
     riderId: String(t.rider),
-    driverId: t.driver ? String(t.driver) : undefined,
+    driverId: driverIdFromTrip(t),
+    ...(driverProfile ? { driverProfile } : {}),
     pickup: pickup ?? t.pickup,
     ...(t.pickupAddress ? { pickupAddress: t.pickupAddress } : {}),
     ...(dropoff ? { dropoff } : {}),

@@ -9,10 +9,8 @@ import {
   Pressable,
   StyleSheet,
   Text,
-  TextInput,
   View,
 } from "react-native";
-import { MaterialIcons } from "@expo/vector-icons";
 import MapView, { Marker, Polyline, PROVIDER_GOOGLE } from "react-native-maps";
 import * as Location from "expo-location";
 import AsyncStorage from "@react-native-async-storage/async-storage";
@@ -119,13 +117,15 @@ function openMapsNavigation(lat, lng, label) {
 
 export default function App() {
   const [token, setToken] = useState(null);
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [available, setAvailable] = useState([]);
   const [activeTrip, setActiveTrip] = useState(null);
   const [previewTrip, setPreviewTrip] = useState(null);
   const [me, setMe] = useState(null);
+  const [sessionUser, setSessionUser] = useState(null);
+  const [devDrivers, setDevDrivers] = useState([]);
+  const [devListErr, setDevListErr] = useState(null);
+  const [devRefreshing, setDevRefreshing] = useState(false);
   const socketRef = useRef(null);
   const watchRef = useRef(null);
   const mapRef = useRef(null);
@@ -164,12 +164,48 @@ export default function App() {
     }
   }, []);
 
+  const refreshSessionUser = useCallback(async (t) => {
+    try {
+      const { user } = await api("/auth/me", { token: t });
+      setSessionUser(user || null);
+    } catch {
+      setSessionUser(null);
+    }
+  }, []);
+
   useEffect(() => {
     (async () => {
       const t = await AsyncStorage.getItem(TOKEN_KEY);
       setToken(t);
     })();
   }, []);
+
+  useEffect(() => {
+    if (token) refreshSessionUser(token);
+    else setSessionUser(null);
+  }, [token, refreshSessionUser]);
+
+  const loadDevDrivers = useCallback(async () => {
+    try {
+      const { drivers } = await api("/auth/dev/drivers");
+      setDevDrivers(Array.isArray(drivers) ? drivers : []);
+      setDevListErr(null);
+    } catch (e) {
+      const msg = String(e?.message || e);
+      setDevDrivers([]);
+      const looks404 = /\b404\b/i.test(msg) || /not found/i.test(msg);
+      setDevListErr(
+        looks404
+          ? "Dev sign-in is disabled. Set TNC_DEV_AUTH=1 on the API and restart."
+          : msg
+      );
+    }
+  }, []);
+
+  useEffect(() => {
+    if (token) return;
+    loadDevDrivers();
+  }, [token, loadDevDrivers]);
 
   useEffect(() => {
     if (!token) {
@@ -223,6 +259,7 @@ export default function App() {
         ) {
           merged.dropoff = prev.dropoff;
         }
+        if (prev.driverProfile && !next.driverProfile) merged.driverProfile = prev.driverProfile;
         return merged;
       });
     };
@@ -268,40 +305,19 @@ export default function App() {
     };
   }, [token, activeTripId]);
 
-  const login = async () => {
+  const pickDriver = async (driverId) => {
     setBusy(true);
     try {
-      const { token: t } = await api("/auth/login", {
+      const { token: t, user } = await api("/auth/dev/login", {
         method: "POST",
-        body: { email, password },
+        body: { driverId },
       });
       await AsyncStorage.setItem(TOKEN_KEY, t);
       setToken(t);
+      setSessionUser(user || null);
       await loadAvailable(t);
     } catch (e) {
-      Alert.alert("Login failed", String(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const register = async () => {
-    setBusy(true);
-    try {
-      const { token: t } = await api("/auth/register", {
-        method: "POST",
-        body: {
-          email,
-          password,
-          name: email.split("@")[0] || "Driver",
-          role: "driver",
-        },
-      });
-      await AsyncStorage.setItem(TOKEN_KEY, t);
-      setToken(t);
-      await loadAvailable(t);
-    } catch (e) {
-      Alert.alert("Register failed", String(e));
+      Alert.alert("Sign in failed", String(e));
     } finally {
       setBusy(false);
     }
@@ -317,6 +333,7 @@ export default function App() {
     setActiveTrip(null);
     setAvailable([]);
     setMe(null);
+    setSessionUser(null);
   };
 
   const accept = async (tripId) => {
@@ -378,6 +395,30 @@ export default function App() {
     }
   };
 
+  const startRide = async () => {
+    if (!token || !activeTrip) return;
+    const rawId = [activeTrip._id, activeTrip.id].find((x) => x != null && String(x).length > 0);
+    const idStr = rawId != null ? String(rawId) : "";
+    if (!idStr) return;
+    setBusy(true);
+    try {
+      const { trip } = await api(`/trips/${idStr}/start-ride`, { method: "POST", token });
+      setActiveTrip((prev) => {
+        if (!prev || String(prev._id) !== String(trip._id)) return trip;
+        const merged = { ...prev, ...trip };
+        if (prev.dropoff?.lat != null && (trip.dropoff == null || trip.dropoff?.lat == null)) {
+          merged.dropoff = prev.dropoff;
+        }
+        if (prev.driverProfile && !trip.driverProfile) merged.driverProfile = prev.driverProfile;
+        return merged;
+      });
+    } catch (e) {
+      Alert.alert("Start ride", String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   /** Testing: cancel the trip (rider sees it cleared via socket). */
   const cancelTrip = async () => {
     if (!token || !activeTrip) return;
@@ -402,34 +443,49 @@ export default function App() {
   };
 
   const region = useMemo(() => {
-    if (activeTrip) {
-      const p = activeTrip.pickup;
-      const d = activeTrip.dropoff;
-      if (d?.lat != null && d?.lng != null) {
-        const midLat = (p.lat + d.lat) / 2;
-        const midLng = (p.lng + d.lng) / 2;
-        const span = Math.max(Math.abs(p.lat - d.lat), Math.abs(p.lng - d.lng), 0.02) * 1.4;
-        return {
-          latitude: midLat,
-          longitude: midLng,
-          latitudeDelta: span,
-          longitudeDelta: span,
-        };
-      }
+    if (!activeTrip) {
       return {
-        latitude: p.lat,
-        longitude: p.lng,
-        latitudeDelta: 0.08,
-        longitudeDelta: 0.08,
+        latitude: 37.78,
+        longitude: -122.4,
+        latitudeDelta: 0.2,
+        longitudeDelta: 0.2,
       };
     }
-    return {
-      latitude: 37.78,
-      longitude: -122.4,
-      latitudeDelta: 0.2,
-      longitudeDelta: 0.2,
-    };
-  }, [activeTrip]);
+    const p = activeTrip.pickup;
+    const d = activeTrip.dropoff;
+    const st = activeTrip.status || "accepted";
+    const spanAB = (a, b) =>
+      Math.max(Math.abs(a.lat - b.lat), Math.abs(a.lng - b.lng), 0.02) * 1.4;
+
+    if (st === "in_progress") {
+      if (d?.lat != null && d?.lng != null && me?.lat != null && me?.lng != null) {
+        return {
+          latitude: (d.lat + me.lat) / 2,
+          longitude: (d.lng + me.lng) / 2,
+          latitudeDelta: spanAB(d, me),
+          longitudeDelta: spanAB(d, me),
+        };
+      }
+      if (d?.lat != null && d?.lng != null) {
+        return { latitude: d.lat, longitude: d.lng, latitudeDelta: 0.08, longitudeDelta: 0.08 };
+      }
+      if (me?.lat != null && me?.lng != null) {
+        return { latitude: me.lat, longitude: me.lng, latitudeDelta: 0.08, longitudeDelta: 0.08 };
+      }
+      return { latitude: p.lat, longitude: p.lng, latitudeDelta: 0.08, longitudeDelta: 0.08 };
+    }
+
+    // accepted: frame driver ↔ pickup (omit dropoff from camera)
+    if (me?.lat != null && me?.lng != null) {
+      return {
+        latitude: (p.lat + me.lat) / 2,
+        longitude: (p.lng + me.lng) / 2,
+        latitudeDelta: spanAB(p, me),
+        longitudeDelta: spanAB(p, me),
+      };
+    }
+    return { latitude: p.lat, longitude: p.lng, latitudeDelta: 0.08, longitudeDelta: 0.08 };
+  }, [activeTrip, me?.lat, me?.lng]);
 
   const previewRegion = useMemo(() => {
     if (!previewTrip) return null;
@@ -461,19 +517,31 @@ export default function App() {
     }
   }, [available, previewTrip]);
 
-  /** Frame pickup, optional dropoff, and you (when GPS is up). */
+  /**
+   * accepted: fit pickup + driver (omit dropoff).
+   * in_progress: fit dropoff + driver (omit pickup).
+   */
   useEffect(() => {
     if (!activeTrip || !mapRef.current) return;
-    const coords = [{ latitude: activeTrip.pickup.lat, longitude: activeTrip.pickup.lng }];
-    if (activeTrip.dropoff?.lat != null && activeTrip.dropoff?.lng != null) {
-      coords.push({
-        latitude: activeTrip.dropoff.lat,
-        longitude: activeTrip.dropoff.lng,
-      });
+    const p = activeTrip.pickup;
+    const d = activeTrip.dropoff;
+    const st = activeTrip.status || "accepted";
+    const coords = [];
+
+    if (st === "in_progress") {
+      if (d?.lat != null && d?.lng != null) {
+        coords.push({ latitude: d.lat, longitude: d.lng });
+      }
+      if (me?.lat != null && me?.lng != null) {
+        coords.push({ latitude: me.lat, longitude: me.lng });
+      }
+    } else {
+      coords.push({ latitude: p.lat, longitude: p.lng });
+      if (me?.lat != null && me?.lng != null) {
+        coords.push({ latitude: me.lat, longitude: me.lng });
+      }
     }
-    if (me?.lat != null && me?.lng != null) {
-      coords.push({ latitude: me.lat, longitude: me.lng });
-    }
+
     if (coords.length < 2) return;
     const t = setTimeout(() => {
       mapRef.current?.fitToCoordinates(coords, {
@@ -484,6 +552,7 @@ export default function App() {
     return () => clearTimeout(t);
   }, [
     activeTrip?._id,
+    activeTrip?.status,
     activeTrip?.pickup?.lat,
     activeTrip?.pickup?.lng,
     activeTrip?.dropoff?.lat,
@@ -494,38 +563,59 @@ export default function App() {
 
   if (!token) {
     return (
-      <View style={styles.auth}>
+      <View style={styles.authPicker}>
         <StatusBar style="dark" />
         <Text style={styles.title}>TNC Driver</Text>
         <Text style={styles.apiHint} selectable>
           API: {getApiUrl()}
         </Text>
-        <TextInput
-          style={styles.input}
-          placeholder="Email"
-          autoCapitalize="none"
-          keyboardType="email-address"
-          value={email}
-          onChangeText={setEmail}
+        <Text style={styles.pickerHint}>
+          Choose which driver you are (dev only). Seed accounts appear when the API runs with TNC_DEV_AUTH=1.
+        </Text>
+        {devListErr ? <Text style={styles.errText}>{devListErr}</Text> : null}
+        <FlatList
+          data={devDrivers}
+          keyExtractor={(x) => x.id}
+          style={{ flex: 1 }}
+          contentContainerStyle={styles.driverListContent}
+          refreshing={devRefreshing}
+          onRefresh={async () => {
+            setDevRefreshing(true);
+            await loadDevDrivers();
+            setDevRefreshing(false);
+          }}
+          renderItem={({ item }) => (
+            <Pressable
+              style={[styles.driverPickRow, busy && styles.btnDisabled]}
+              onPress={() => pickDriver(item.id)}
+              disabled={busy}
+            >
+              <Text style={styles.driverPickName}>{item.label}</Text>
+              {item.vehicleSummary ? <Text style={styles.driverPickVeh}>{item.vehicleSummary}</Text> : null}
+              <Text style={styles.driverPickEmail}>{item.email}</Text>
+            </Pressable>
+          )}
+          ListEmptyComponent={
+            devListErr ? null : (
+              <Text style={styles.empty}>
+                No drivers yet. Start the API with TNC_DEV_AUTH=1 to create demo drivers, then pull to refresh.
+              </Text>
+            )
+          }
         />
-        <TextInput
-          style={styles.input}
-          placeholder="Password"
-          secureTextEntry
-          value={password}
-          onChangeText={setPassword}
-        />
-        <Pressable style={styles.primaryBtn} onPress={login} disabled={busy}>
-          {busy ? <ActivityIndicator color="#fff" /> : <Text style={styles.primaryBtnText}>Log in</Text>}
-        </Pressable>
-        <Pressable style={styles.secondaryBtn} onPress={register} disabled={busy}>
-          <Text style={styles.secondaryBtnText}>Create driver account</Text>
-        </Pressable>
+        {busy ? <ActivityIndicator style={styles.pickerSpinner} /> : null}
       </View>
     );
   }
 
   if (activeTrip) {
+    const enRouteDropoff = activeTrip.status === "in_progress";
+    const hasDrop =
+      activeTrip.dropoff?.lat != null &&
+      activeTrip.dropoff?.lng != null &&
+      Number.isFinite(activeTrip.dropoff.lat) &&
+      Number.isFinite(activeTrip.dropoff.lng);
+
     return (
       <View style={styles.container}>
         <StatusBar style="dark" />
@@ -535,7 +625,7 @@ export default function App() {
           provider={PROVIDER_GOOGLE}
           initialRegion={region}
         >
-          {activeTrip.dropoff?.lat != null && activeTrip.dropoff?.lng != null ? (
+          {!enRouteDropoff && hasDrop ? (
             <Polyline
               coordinates={[
                 { latitude: activeTrip.pickup.lat, longitude: activeTrip.pickup.lng },
@@ -545,15 +635,28 @@ export default function App() {
               strokeWidth={4}
             />
           ) : null}
-          <Marker
-            coordinate={{
-              latitude: activeTrip.pickup.lat,
-              longitude: activeTrip.pickup.lng,
-            }}
-            title="Rider pickup"
-            pinColor="dodgerblue"
-          />
-          {activeTrip.dropoff?.lat != null && activeTrip.dropoff?.lng != null ? (
+          {enRouteDropoff && me && hasDrop ? (
+            <Polyline
+              coordinates={[
+                { latitude: me.lat, longitude: me.lng },
+                { latitude: activeTrip.dropoff.lat, longitude: activeTrip.dropoff.lng },
+              ]}
+              strokeColor="#7c3aed"
+              strokeWidth={4}
+            />
+          ) : null}
+          {!enRouteDropoff ? (
+            <Marker
+              coordinate={{
+                latitude: activeTrip.pickup.lat,
+                longitude: activeTrip.pickup.lng,
+              }}
+              title="Rider pickup"
+              anchor={{ x: 0.5, y: 0.5 }}
+              image={require("./assets/pickup-marker.png")}
+            />
+          ) : null}
+          {hasDrop ? (
             <Marker
               coordinate={{
                 latitude: activeTrip.dropoff.lat,
@@ -561,45 +664,50 @@ export default function App() {
               }}
               title="Dropoff"
               anchor={{ x: 0.5, y: 0.5 }}
-              tracksViewChanges={false}
-            >
-              <View style={styles.dropoffDot} />
-            </Marker>
+              image={require("./assets/dropoff-marker.png")}
+            />
           ) : null}
           {me ? (
             <Marker
               coordinate={{ latitude: me.lat, longitude: me.lng }}
               title="You (driver)"
               anchor={{ x: 0.5, y: 0.5 }}
-              tracksViewChanges={false}
-            >
-              <View style={styles.driverCarMarker}>
-                <MaterialIcons name="directions-car" size={26} color="#ffffff" />
-              </View>
-            </Marker>
+              image={require("./assets/driver-marker.png")}
+            />
           ) : null}
         </MapView>
         <View style={styles.overlay}>
           <Text style={styles.banner}>
-            Blue: pickup. Purple dot + line: dropoff (if set). You are the car. Location streams to the rider.
+            {enRouteDropoff
+              ? "En route to dropoff — map shows you and the destination only. Purple line: remaining leg."
+              : "En route to pickup — map shows you and the rider pickup (dropoff is not used to frame the map). Full purple line previews the trip route."}
             {`\nPickup: ${pickupLabel(activeTrip)}`}
             {dropoffLabel(activeTrip) ? `\nDropoff: ${dropoffLabel(activeTrip)}` : ""}
-            {activeTrip?.etaToPickup
+            {!enRouteDropoff && activeTrip?.etaToPickup
               ? `\nETA to pickup: ${activeTrip.etaToPickup.durationText || `~${activeTrip.etaToPickup.summaryMinutes} min`}${activeTrip.etaToPickup.distanceText ? ` · ${activeTrip.etaToPickup.distanceText}` : ""}${activeTrip.etaToPickup.usesTraffic ? " (traffic)" : ""}`
-              : me
+              : !enRouteDropoff && me
                 ? "\nETA to pickup: updating…"
                 : ""}
           </Text>
           <View style={styles.row}>
-            <Pressable style={styles.smallBtn} onPress={() => openNavigatePickupFor(activeTrip)}>
-              <Text style={styles.smallBtnText}>Nav: pickup</Text>
-            </Pressable>
-            {activeTrip.dropoff?.lat != null && activeTrip.dropoff?.lng != null ? (
+            {!enRouteDropoff ? (
+              <Pressable style={styles.smallBtn} onPress={() => openNavigatePickupFor(activeTrip)}>
+                <Text style={styles.smallBtnText}>Nav: pickup</Text>
+              </Pressable>
+            ) : null}
+            {hasDrop ? (
               <Pressable style={styles.smallBtn} onPress={() => openNavigateDropoffFor(activeTrip)}>
                 <Text style={styles.smallBtnText}>Nav: dropoff</Text>
               </Pressable>
             ) : null}
           </View>
+          {activeTrip.status === "accepted" ? (
+            <View style={styles.row}>
+              <Pressable style={[styles.smallBtn, styles.acceptSmall]} onPress={startRide} disabled={busy}>
+                <Text style={styles.smallBtnTextLight}>{busy ? "Working…" : "Picked up rider"}</Text>
+              </Pressable>
+            </View>
+          ) : null}
           <View style={styles.row}>
             <Pressable style={[styles.smallBtn, styles.warn]} onPress={cancelTrip} disabled={busy}>
               <Text style={styles.smallBtnTextLight}>Clear ride</Text>
@@ -637,7 +745,8 @@ export default function App() {
               longitude: previewTrip.pickup.lng,
             }}
             title="Rider pickup"
-            pinColor="dodgerblue"
+            anchor={{ x: 0.5, y: 0.5 }}
+            image={require("./assets/pickup-marker.png")}
           />
           {previewTrip.dropoff?.lat != null && previewTrip.dropoff?.lng != null ? (
             <Marker
@@ -646,15 +755,15 @@ export default function App() {
                 longitude: previewTrip.dropoff.lng,
               }}
               title="Dropoff"
-            >
-              <View style={styles.dropoffDot} />
-            </Marker>
+              anchor={{ x: 0.5, y: 0.5 }}
+              image={require("./assets/dropoff-marker.png")}
+            />
           ) : null}
         </MapView>
         <View style={styles.overlay}>
           <Text style={styles.banner}>
-            Trip preview. Blue is pickup.
-            {` Purple is dropoff when set.\nPickup: ${pickupLabel(previewTrip)}`}
+            Trip preview. Person icon = pickup.
+            {` Flag icon = dropoff when set.\nPickup: ${pickupLabel(previewTrip)}`}
             {dropoffLabel(previewTrip) ? `\nDropoff: ${dropoffLabel(previewTrip)}` : "\nNo dropoff set on this request."}
           </Text>
           <View style={styles.row}>
@@ -683,10 +792,20 @@ export default function App() {
     );
   }
 
+  const pub = sessionUser?.driverPublic;
+  const signedInLine = pub
+    ? `Signed in as ${pub.firstName}${pub.lastInitial ? ` ${pub.lastInitial}` : ""}${
+        pub.vehicle?.color && pub.vehicle?.model ? ` · ${pub.vehicle.color} ${pub.vehicle.model}` : ""
+      }`
+    : sessionUser?.email
+      ? `Signed in as ${sessionUser.email}`
+      : "";
+
   return (
     <View style={styles.listWrap}>
       <StatusBar style="dark" />
       <Text style={styles.listTitle}>Open requests</Text>
+      {signedInLine ? <Text style={styles.signedInLine}>{signedInLine}</Text> : null}
       <Pressable style={styles.refresh} onPress={() => token && loadAvailable(token)}>
         <Text style={styles.refreshText}>Refresh</Text>
       </Pressable>
@@ -723,33 +842,27 @@ export default function App() {
 }
 
 const styles = StyleSheet.create({
-  auth: {
-    flex: 1,
-    padding: 24,
-    justifyContent: "center",
-    gap: 12,
-    backgroundColor: "#f8fafc",
+  authPicker: { flex: 1, backgroundColor: "#f8fafc", paddingTop: 56, paddingHorizontal: 16 },
+  pickerHint: { fontSize: 13, color: "#475569", marginBottom: 12, lineHeight: 18 },
+  errText: { fontSize: 13, color: "#b91c1c", marginBottom: 12 },
+  driverListContent: { paddingBottom: 32, flexGrow: 1 },
+  driverPickRow: {
+    backgroundColor: "#fff",
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 10,
+    borderWidth: 1,
+    borderColor: "#e2e8f0",
   },
+  driverPickName: { fontSize: 17, fontWeight: "700", color: "#0f172a" },
+  driverPickVeh: { fontSize: 14, color: "#64748b", marginTop: 4 },
+  driverPickEmail: { fontSize: 12, color: "#94a3b8", marginTop: 6 },
+  pickerSpinner: { marginVertical: 12 },
   title: { fontSize: 24, fontWeight: "700", marginBottom: 8 },
   apiHint: { fontSize: 11, color: "#64748b", marginBottom: 12 },
-  input: {
-    borderWidth: 1,
-    borderColor: "#cbd5e1",
-    borderRadius: 10,
-    padding: 14,
-    backgroundColor: "#fff",
-  },
-  primaryBtn: {
-    backgroundColor: "#059669",
-    padding: 16,
-    borderRadius: 10,
-    alignItems: "center",
-  },
-  primaryBtnText: { color: "#fff", fontWeight: "600" },
-  secondaryBtn: { padding: 12, alignItems: "center" },
-  secondaryBtnText: { color: "#059669", fontWeight: "600" },
   container: { flex: 1 },
   listWrap: { flex: 1, paddingTop: 56, paddingHorizontal: 16, backgroundColor: "#f8fafc" },
+  signedInLine: { fontSize: 13, color: "#475569", marginBottom: 10 },
   listTitle: { fontSize: 22, fontWeight: "700", marginBottom: 8 },
   refresh: { alignSelf: "flex-start", marginBottom: 12 },
   refreshText: { color: "#059669", fontWeight: "600" },
@@ -790,29 +903,6 @@ const styles = StyleSheet.create({
     right: 12,
     bottom: 36,
     gap: 10,
-  },
-  dropoffDot: {
-    width: 22,
-    height: 22,
-    borderRadius: 11,
-    backgroundColor: "#7c3aed",
-    borderWidth: 3,
-    borderColor: "#fff",
-  },
-  driverCarMarker: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
-    backgroundColor: "#059669",
-    borderWidth: 3,
-    borderColor: "#fff",
-    justifyContent: "center",
-    alignItems: "center",
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.28,
-    shadowRadius: 4,
-    elevation: 5,
   },
   banner: {
     backgroundColor: "rgba(255,255,255,0.95)",
