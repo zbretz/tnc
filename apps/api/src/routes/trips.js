@@ -1,9 +1,11 @@
 import { Router } from "express";
 import mongoose from "mongoose";
 import { Trip } from "../models/Trip.js";
+import { User } from "../models/User.js";
 import { authMiddleware, requireRole } from "../middleware/auth.js";
 import { serializeTrip } from "../serialize.js";
 import { clearPickupEtaThrottle, tryRefreshPickupEta } from "../pickupEta.js";
+import { getRiderServiceConfig } from "../models/AppSettings.js";
 
 const POPULATE_DRIVER = { path: "driver", select: "-passwordHash" };
 
@@ -81,6 +83,14 @@ export function createTripsRouter(deps) {
   }
 
   r.post("/", authMiddleware, requireRole("rider"), async (req, res) => {
+    const cfg = await getRiderServiceConfig();
+    if (!cfg.driversAvailable) {
+      res.status(503).json({
+        error: cfg.closedMessage,
+        code: "riders_closed",
+      });
+      return;
+    }
     const { pickup, dropoff, pickupAddress, dropoffAddress } = req.body || {};
     const pickupLL = parseLatLng(pickup);
     if (!pickupLL) {
@@ -103,9 +113,21 @@ export function createTripsRouter(deps) {
     res.status(201).json({ trip: out });
   });
 
-  r.get("/available", authMiddleware, requireRole("driver"), async (_req, res) => {
-    const trips = await Trip.find({ status: "requested" }).sort({ createdAt: -1 }).limit(50).exec();
-    res.json({ trips: trips.map(serializeTrip) });
+  r.get("/available", authMiddleware, requireRole("driver"), async (req, res) => {
+    const me = await User.findById(req.userId).select("isAdmin").lean().exec();
+    const filter = { status: "requested" };
+    const trips = me?.isAdmin
+      ? await Trip.find(filter).sort({ createdAt: -1 }).limit(50).populate({ path: "rider", select: "phone" }).exec()
+      : await Trip.find(filter).sort({ createdAt: -1 }).limit(50).exec();
+    res.json({
+      trips: trips.map((t) => {
+        const phone =
+          me?.isAdmin && t.rider && typeof t.rider === "object" && t.rider.phone
+            ? String(t.rider.phone).trim()
+            : undefined;
+        return serializeTrip(t, phone ? { riderPhone: phone } : {});
+      }),
+    });
   });
 
   /** Body: { tripId } — avoids path quirks on some mobile HTTP stacks. */

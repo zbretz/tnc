@@ -25,6 +25,10 @@ const userSchema = new mongoose.Schema(
     /** Driver profile image (MVP: URL or small data URL). */
     avatarUrl: { type: String, default: "" },
     vehicle: { type: vehicleSchema, default: () => ({}) },
+    /** E.164 or free-form; shown to admin drivers on open trip requests only. */
+    phone: { type: String, default: "", trim: true },
+    /** Primary ops driver (seed: driver1@tnc.local). Can toggle rider availability and see rider phones on requests. */
+    isAdmin: { type: Boolean, default: false },
   },
   { timestamps: true }
 );

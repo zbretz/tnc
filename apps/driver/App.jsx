@@ -8,7 +8,9 @@ import {
   Platform,
   Pressable,
   StyleSheet,
+  Switch,
   Text,
+  TextInput,
   View,
 } from "react-native";
 import MapView, { Marker, Polyline, PROVIDER_GOOGLE } from "react-native-maps";
@@ -126,6 +128,8 @@ export default function App() {
   const [devDrivers, setDevDrivers] = useState([]);
   const [devListErr, setDevListErr] = useState(null);
   const [devRefreshing, setDevRefreshing] = useState(false);
+  const [adminRiderCfg, setAdminRiderCfg] = useState(null);
+  const [adminClosedMsgDraft, setAdminClosedMsgDraft] = useState("");
   const socketRef = useRef(null);
   const watchRef = useRef(null);
   const mapRef = useRef(null);
@@ -184,6 +188,42 @@ export default function App() {
     if (token) refreshSessionUser(token);
     else setSessionUser(null);
   }, [token, refreshSessionUser]);
+
+  useEffect(() => {
+    if (!token || !sessionUser?.isAdmin) {
+      setAdminRiderCfg(null);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const c = await api("/admin/rider-service", { token });
+        if (!cancelled) {
+          setAdminRiderCfg(c);
+          setAdminClosedMsgDraft(c.closedMessage || "");
+        }
+      } catch {
+        if (!cancelled) setAdminRiderCfg(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [token, sessionUser?.isAdmin]);
+
+  const patchAdminRiderService = useCallback(
+    async (body) => {
+      if (!token) return;
+      try {
+        const c = await api("/admin/rider-service", { method: "PATCH", token, body });
+        setAdminRiderCfg(c);
+        setAdminClosedMsgDraft(c.closedMessage || "");
+      } catch (e) {
+        Alert.alert("Rider app settings", String(e));
+      }
+    },
+    [token]
+  );
 
   const loadDevDrivers = useCallback(async () => {
     try {
@@ -765,6 +805,7 @@ export default function App() {
             Trip preview. Person icon = pickup.
             {` Flag icon = dropoff when set.\nPickup: ${pickupLabel(previewTrip)}`}
             {dropoffLabel(previewTrip) ? `\nDropoff: ${dropoffLabel(previewTrip)}` : "\nNo dropoff set on this request."}
+            {previewTrip.riderPhone ? `\nRider phone: ${previewTrip.riderPhone}` : ""}
           </Text>
           <View style={styles.row}>
             <Pressable style={styles.smallBtn} onPress={() => openNavigatePickupFor(previewTrip)}>
@@ -806,6 +847,42 @@ export default function App() {
       <StatusBar style="dark" />
       <Text style={styles.listTitle}>Open requests</Text>
       {signedInLine ? <Text style={styles.signedInLine}>{signedInLine}</Text> : null}
+      {sessionUser?.isAdmin ? (
+        <View style={styles.adminBox}>
+          <Text style={styles.adminTitle}>Rider app (admin)</Text>
+          {!adminRiderCfg ? (
+            <ActivityIndicator style={{ marginVertical: 12 }} />
+          ) : (
+            <>
+              <View style={styles.adminRow}>
+                <Text style={styles.adminLabel}>Accepting new ride requests</Text>
+                <Switch
+                  value={adminRiderCfg.driversAvailable !== false}
+                  onValueChange={(v) => patchAdminRiderService({ driversAvailable: v })}
+                />
+              </View>
+              <Text style={styles.adminHint}>
+                When off, riders see your message and cannot start a new request. Open trips are unchanged.
+              </Text>
+              <Text style={styles.adminLabel}>Message when closed</Text>
+              <TextInput
+                style={styles.adminInput}
+                value={adminClosedMsgDraft}
+                onChangeText={setAdminClosedMsgDraft}
+                placeholder="e.g. No drivers available — come back soon."
+                onSubmitEditing={() => patchAdminRiderService({ closedMessage: adminClosedMsgDraft })}
+                returnKeyType="done"
+              />
+              <Pressable
+                style={styles.adminSaveMsg}
+                onPress={() => patchAdminRiderService({ closedMessage: adminClosedMsgDraft })}
+              >
+                <Text style={styles.adminSaveMsgText}>Save message</Text>
+              </Pressable>
+            </>
+          )}
+        </View>
+      ) : null}
       <Pressable style={styles.refresh} onPress={() => token && loadAvailable(token)}>
         <Text style={styles.refreshText}>Refresh</Text>
       </Pressable>
@@ -823,6 +900,9 @@ export default function App() {
               Pickup: {pickupLabel(item)}
             </Text>
             <Text style={styles.cardMeta}>Dropoff: {dropoffLabel(item) || "Not set"}</Text>
+            {item.riderPhone ? (
+              <Text style={styles.cardPhone}>Rider phone: {item.riderPhone}</Text>
+            ) : null}
             <View style={styles.cardRow}>
               <Pressable style={[styles.previewBtn, busy && styles.btnDisabled]} onPress={() => setPreviewTrip(item)} disabled={busy}>
                 <Text style={styles.previewBtnText}>Preview</Text>
@@ -863,6 +943,29 @@ const styles = StyleSheet.create({
   container: { flex: 1 },
   listWrap: { flex: 1, paddingTop: 56, paddingHorizontal: 16, backgroundColor: "#f8fafc" },
   signedInLine: { fontSize: 13, color: "#475569", marginBottom: 10 },
+  adminBox: {
+    backgroundColor: "#fff",
+    borderRadius: 12,
+    padding: 14,
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: "#c4b5fd",
+  },
+  adminTitle: { fontSize: 15, fontWeight: "700", color: "#5b21b6", marginBottom: 10 },
+  adminRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 8 },
+  adminLabel: { fontSize: 14, fontWeight: "600", color: "#0f172a", flex: 1, marginRight: 8 },
+  adminHint: { fontSize: 12, color: "#64748b", marginBottom: 12, lineHeight: 17 },
+  adminInput: {
+    borderWidth: 1,
+    borderColor: "#cbd5e1",
+    borderRadius: 10,
+    padding: 12,
+    fontSize: 14,
+    backgroundColor: "#f8fafc",
+    marginBottom: 8,
+  },
+  adminSaveMsg: { alignSelf: "flex-start", paddingVertical: 8, paddingHorizontal: 12 },
+  adminSaveMsgText: { color: "#059669", fontWeight: "700", fontSize: 14 },
   listTitle: { fontSize: 22, fontWeight: "700", marginBottom: 8 },
   refresh: { alignSelf: "flex-start", marginBottom: 12 },
   refreshText: { color: "#059669", fontWeight: "600" },
@@ -876,7 +979,8 @@ const styles = StyleSheet.create({
     borderColor: "#e2e8f0",
   },
   cardTitle: { fontSize: 16, fontWeight: "700" },
-  cardMeta: { color: "#64748b", marginTop: 4, marginBottom: 12 },
+  cardMeta: { color: "#64748b", marginTop: 4, marginBottom: 4 },
+  cardPhone: { fontSize: 14, fontWeight: "600", color: "#0f172a", marginBottom: 12 },
   cardRow: { flexDirection: "row", gap: 8 },
   previewBtn: {
     backgroundColor: "#0f172a",

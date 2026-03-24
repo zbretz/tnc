@@ -11,6 +11,8 @@ import { verifyToken } from "./middleware/auth.js";
 import { serializeTrip } from "./serialize.js";
 import { tryRefreshPickupEta } from "./pickupEta.js";
 import { seedDevDriversIfNeeded } from "./seedDevDrivers.js";
+import { ensureAppSettings, getRiderServiceConfig } from "./models/AppSettings.js";
+import { createAdminRouter } from "./routes/admin.js";
 
 const PORT = Number(process.env.PORT) || 3000;
 // const MONGODB_URI = process.env.MONGODB_URI || "mongodb://127.0.0.1:27017/tnc";
@@ -42,8 +44,25 @@ const tripsRouter = createTripsRouter({
   },
 });
 
+const adminRouter = createAdminRouter({
+  onRiderServiceUpdated(cfg) {
+    io.to("riders").emit("riderService:updated", cfg);
+  },
+});
+
 app.use("/auth", authRouter);
 app.use("/trips", tripsRouter);
+app.use("/admin", adminRouter);
+
+app.get("/config/rider", async (_req, res) => {
+  try {
+    const cfg = await getRiderServiceConfig();
+    res.json(cfg);
+  } catch (e) {
+    console.error("GET /config/rider", e);
+    res.status(500).json({ error: "Server error" });
+  }
+});
 
 app.get("/health", (_req, res) => {
   res.json({ ok: true });
@@ -71,6 +90,12 @@ io.on("connection", (socket) => {
   const { userId, role } = socket.data;
   if (role === "driver") {
     socket.join("drivers");
+  }
+  if (role === "rider") {
+    socket.join("riders");
+    getRiderServiceConfig()
+      .then((cfg) => socket.emit("riderService:updated", cfg))
+      .catch(() => {});
   }
 
   socket.on("trip:subscribe", async (raw) => {
@@ -116,6 +141,7 @@ io.on("connection", (socket) => {
 });
 
 mongoose.connect(MONGODB_URI).then(async () => {
+  await ensureAppSettings().catch((e) => console.error("[tnc] ensureAppSettings", e));
   if (process.env.TNC_DEV_AUTH === "1") {
     await seedDevDriversIfNeeded().catch((e) => console.error("[tnc] seedDevDriversIfNeeded", e));
   }

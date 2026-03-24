@@ -49,8 +49,17 @@ function splitNameForDriver(name, firstNameIn, lastNameIn) {
 }
 
 r.post("/register", async (req, res) => {
-  const { email, password, name, role, firstName, lastName, avatarUrl: avatarIn, vehicle: vehicleRaw } =
-    req.body || {};
+  const {
+    email,
+    password,
+    name,
+    role,
+    firstName,
+    lastName,
+    avatarUrl: avatarIn,
+    vehicle: vehicleRaw,
+    phone: phoneIn,
+  } = req.body || {};
   if (!email || !password || !name || !role || !["rider", "driver"].includes(role)) {
     res.status(400).json({ error: "email, password, name, and role (rider|driver) required" });
     return;
@@ -67,6 +76,9 @@ r.post("/register", async (req, res) => {
     name: String(name).trim(),
     role,
   };
+  if (role === "rider" && phoneIn != null && String(phoneIn).trim()) {
+    doc.phone = String(phoneIn).trim().slice(0, 32);
+  }
   if (role === "driver") {
     const { first, last } = splitNameForDriver(name, firstName, lastName);
     doc.firstName = first;
@@ -116,7 +128,7 @@ r.get("/dev/drivers", async (req, res) => {
     return;
   }
   const drivers = await User.find({ role: "driver" })
-    .select("email name firstName lastName vehicle")
+    .select("email name firstName lastName vehicle isAdmin")
     .sort({ email: 1 })
     .lean()
     .exec();
@@ -129,9 +141,10 @@ r.get("/dev/drivers", async (req, res) => {
       const lastI = lastRaw[0] ? `${lastRaw[0].toUpperCase()}.` : "";
       const v = d.vehicle && typeof d.vehicle === "object" ? d.vehicle : {};
       const vehLabel = [v.color, v.make, v.model].filter((x) => typeof x === "string" && x.trim()).join(" ");
+      const label = [first, lastI].filter(Boolean).join(" ");
       return {
         id: String(d._id),
-        label: [first, lastI].filter(Boolean).join(" "),
+        label: d.isAdmin ? `${label} · admin` : label,
         email: d.email,
         vehicleSummary: vehLabel,
       };
@@ -202,6 +215,9 @@ r.patch("/me", authMiddleware, async (req, res) => {
       const prev = user.vehicle?.toObject?.() ?? user.vehicle ?? {};
       user.vehicle = { ...prev, ...veh };
     }
+  }
+  if (user.role === "rider" && phoneIn !== undefined) {
+    user.phone = String(phoneIn).trim().slice(0, 32);
   }
   await user.save();
   const fresh = await User.findById(user._id).select("-passwordHash").exec();

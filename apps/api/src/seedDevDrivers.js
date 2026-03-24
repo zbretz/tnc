@@ -8,6 +8,8 @@ const SEEDS = [
     firstName: "Alex",
     lastName: "Rivera",
     role: "driver",
+    isAdmin: true,
+    phone: "+1-555-0100",
     vehicle: { make: "Toyota", model: "Camry", color: "Silver", licensePlate: "TNC-001", photoUrl: "" },
   },
   {
@@ -47,6 +49,12 @@ export async function seedDevDriversIfNeeded() {
       lastName: s.lastName,
       avatarUrl: "",
       vehicle: s.vehicle,
+      isAdmin: Boolean(s.isAdmin),
+      phone: typeof s.phone === "string" ? s.phone : "",
     });
   }
+  await User.updateOne(
+    { email: "driver1@tnc.local" },
+    { $set: { isAdmin: true, phone: "+1-555-0100" } }
+  ).exec();
 }

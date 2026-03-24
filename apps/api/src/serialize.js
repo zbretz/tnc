@@ -43,6 +43,8 @@ export function serializeUserMe(user) {
     email: user.email,
     name: user.name,
     role: user.role,
+    isAdmin: Boolean(user.isAdmin),
+    phone: trimOrEmpty(user.phone),
     firstName: trimOrEmpty(user.firstName),
     lastName: trimOrEmpty(user.lastName),
     avatarUrl: trimOrEmpty(user.avatarUrl),
@@ -70,6 +72,13 @@ function driverIdFromTrip(t) {
   return String(t.driver._id ?? t.driver);
 }
 
+function riderIdFromTripDoc(t) {
+  const r = t?.rider;
+  if (r == null) return "";
+  if (typeof r === "object" && r._id != null) return String(r._id);
+  return String(r);
+}
+
 function isPopulatedDriver(driver) {
   return driver != null && typeof driver === "object" && driver._id != null && driver.role === "driver";
 }
@@ -83,13 +92,16 @@ function pickLatLng(p) {
   return { lat, lng };
 }
 
-export function serializeTrip(t) {
+export function serializeTrip(t, options = {}) {
   const pickup = pickLatLng(t.pickup);
   const dropoff = pickLatLng(t.dropoff);
   const driverProfile = isPopulatedDriver(t.driver) ? serializeDriverPublic(t.driver) : undefined;
+  const riderPhoneRaw = options.riderPhone;
+  const riderPhone =
+    typeof riderPhoneRaw === "string" && riderPhoneRaw.trim() ? riderPhoneRaw.trim() : undefined;
   return {
     _id: String(t._id),
-    riderId: String(t.rider),
+    riderId: riderIdFromTripDoc(t),
     driverId: driverIdFromTrip(t),
     ...(driverProfile ? { driverProfile } : {}),
     pickup: pickup ?? t.pickup,
@@ -97,6 +109,7 @@ export function serializeTrip(t) {
     ...(dropoff ? { dropoff } : {}),
     ...(t.dropoffAddress ? { dropoffAddress: t.dropoffAddress } : {}),
     status: t.status,
+    ...(riderPhone ? { riderPhone } : {}),
     driverLocation: t.driverLocation?.updatedAt
       ? {
           lat: t.driverLocation.lat,

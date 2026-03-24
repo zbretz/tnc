@@ -65,6 +65,26 @@ async function api(path, opts = {}) {
   return data;
 }
 
+async function fetchRiderServicePublic() {
+  const base = getApiUrl().replace(/\/$/, "");
+  const url = `${base}/config/rider`;
+  const res = await fetch(url, { headers: { Accept: "application/json" } });
+  const text = await res.text();
+  let data = {};
+  try {
+    data = text ? JSON.parse(text) : {};
+  } catch {
+    data = {};
+  }
+  if (!res.ok) {
+    throw new Error(data.error || text || `HTTP ${res.status}`);
+  }
+  return {
+    driversAvailable: data.driversAvailable !== false,
+    closedMessage: typeof data.closedMessage === "string" ? data.closedMessage : "",
+  };
+}
+
 function formatAddress(parts) {
   if (!parts) return null;
   const line1 = [parts.name, parts.streetNumber, parts.street].filter(Boolean).join(" ").trim();
@@ -151,7 +171,10 @@ export default function App() {
   const [planEntryMode, setPlanEntryMode] = useState("map");
   const [trip, setTrip] = useState(null);
   const [driverLive, setDriverLive] = useState(null);
+  const [riderService, setRiderService] = useState({ driversAvailable: true, closedMessage: "" });
+  const [regPhone, setRegPhone] = useState("");
   const socketRef = useRef(null);
+  const tripIdRef = useRef(null);
   const mapRef = useRef(null);
 
   useEffect(() => {
@@ -161,16 +184,48 @@ export default function App() {
     })();
   }, []);
 
-  const subscribeTripSocket = useCallback((tripId, authToken) => {
-    socketRef.current?.disconnect();
+  /** One HTTP read for login screen + first paint; logged-in riders also get pushes over Socket.io. */
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const c = await fetchRiderServicePublic();
+        if (!cancelled) setRiderService(c);
+      } catch {
+        if (!cancelled) setRiderService({ driversAvailable: true, closedMessage: "" });
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    tripIdRef.current = trip?._id != null ? String(trip._id) : null;
+  }, [trip?._id]);
+
+  useEffect(() => {
+    if (!token) {
+      socketRef.current?.disconnect();
+      socketRef.current = null;
+      return;
+    }
     const s = io(getApiUrl(), {
-      auth: { token: authToken },
+      auth: { token },
       transports: ["websocket"],
     });
     socketRef.current = s;
-    s.on("connect", () => {
-      s.emit("trip:subscribe", { tripId });
-    });
+
+    const applyRiderService = (payload) => {
+      if (!payload || typeof payload !== "object") return;
+      setRiderService({
+        driversAvailable: payload.driversAvailable !== false,
+        closedMessage: typeof payload.closedMessage === "string" ? payload.closedMessage : "",
+      });
+    };
+
+    s.on("riderService:updated", applyRiderService);
+
     s.on("trip:updated", (msg) => {
       if (msg?.trip) {
         if (msg.trip.status === "cancelled" || msg.trip.status === "completed") {
@@ -198,23 +253,29 @@ export default function App() {
         setDriverLive({ lat: msg.lat, lng: msg.lng });
       }
     });
+    s.on("connect", () => {
+      const tid = tripIdRef.current;
+      if (tid) s.emit("trip:subscribe", { tripId: tid });
+    });
     s.on("connect_error", () => {});
-  }, []);
 
-  useEffect(() => {
     return () => {
-      socketRef.current?.disconnect();
+      s.disconnect();
+      if (socketRef.current === s) socketRef.current = null;
     };
-  }, []);
+  }, [token]);
 
   useEffect(() => {
-    if (token && trip?._id) {
-      subscribeTripSocket(trip._id, token);
-    } else {
-      socketRef.current?.disconnect();
-      socketRef.current = null;
-    }
-  }, [token, trip?._id, subscribeTripSocket]);
+    const s = socketRef.current;
+    if (!s || !token) return;
+    const id = trip?._id != null ? String(trip._id) : null;
+    if (id && s.connected) s.emit("trip:subscribe", { tripId: id });
+    return () => {
+      if (id && socketRef.current?.connected) {
+        socketRef.current.emit("trip:unsubscribe", { tripId: id });
+      }
+    };
+  }, [token, trip?._id]);
 
   const login = async () => {
     setBusy(true);
@@ -235,9 +296,16 @@ export default function App() {
   const register = async () => {
     setBusy(true);
     try {
+      const body = {
+        email,
+        password,
+        name: email.split("@")[0] || "Rider",
+        role: "rider",
+        ...(regPhone.trim() ? { phone: regPhone.trim() } : {}),
+      };
       const { token: t } = await api("/auth/register", {
         method: "POST",
-        body: { email, password, name: email.split("@")[0] || "Rider", role: "rider" },
+        body,
       });
       await AsyncStorage.setItem(TOKEN_KEY, t);
       setToken(t);
@@ -580,6 +648,9 @@ export default function App() {
     displayDropoff?.lng,
   ]);
 
+  const ridersPaused = !riderService.driversAvailable;
+  const showRidersClosedGate = token && !trip && ridersPaused;
+
   if (!token) {
     return (
       <View style={styles.auth}>
@@ -588,6 +659,12 @@ export default function App() {
         <Text style={styles.apiHint} selectable>
           API: {getApiUrl()}
         </Text>
+        {ridersPaused ? (
+          <View style={styles.publicClosedBanner}>
+            <Text style={styles.publicClosedTitle}>Rides paused</Text>
+            <Text style={styles.publicClosedText}>{riderService.closedMessage || "Please check back soon."}</Text>
+          </View>
+        ) : null}
         <TextInput
           style={styles.input}
           placeholder="Email"
@@ -603,6 +680,13 @@ export default function App() {
           value={password}
           onChangeText={setPassword}
         />
+        <TextInput
+          style={styles.input}
+          placeholder="Phone (optional, for driver contact)"
+          keyboardType="phone-pad"
+          value={regPhone}
+          onChangeText={setRegPhone}
+        />
         <Pressable style={styles.primaryBtn} onPress={login} disabled={busy}>
           {busy ? <ActivityIndicator color="#fff" /> : <Text style={styles.primaryBtnText}>Log in</Text>}
         </Pressable>
@@ -616,6 +700,29 @@ export default function App() {
   return (
     <View style={styles.container}>
       <StatusBar style="dark" />
+      {showRidersClosedGate ? (
+        <View style={styles.ridersClosedLayer} pointerEvents="box-none">
+          <View style={styles.ridersClosedCard} pointerEvents="auto">
+            <Text style={styles.ridersClosedTitle}>No drivers available</Text>
+            <Text style={styles.ridersClosedBody}>
+              {riderService.closedMessage || "Please check back soon."}
+            </Text>
+            <Pressable
+              style={[styles.smallBtn, styles.primarySmall]}
+              onPress={async () => {
+                try {
+                  const c = await fetchRiderServicePublic();
+                  setRiderService(c);
+                } catch {
+                  Alert.alert("Check status", "Could not reach the server.");
+                }
+              }}
+            >
+              <Text style={[styles.smallBtnText, styles.smallBtnTextOnPrimary]}>Check again</Text>
+            </Pressable>
+          </View>
+        </View>
+      ) : null}
       <MapView
         ref={mapRef}
         style={StyleSheet.absoluteFill}
@@ -888,6 +995,37 @@ export default function App() {
 
 const styles = StyleSheet.create({
   container: { flex: 1 },
+  publicClosedBanner: {
+    backgroundColor: "#fef3c7",
+    borderRadius: 12,
+    padding: 14,
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: "#fcd34d",
+  },
+  publicClosedTitle: { fontSize: 15, fontWeight: "700", color: "#92400e", marginBottom: 6 },
+  publicClosedText: { fontSize: 14, color: "#78350f", lineHeight: 20 },
+  ridersClosedLayer: {
+    ...StyleSheet.absoluteFillObject,
+    justifyContent: "flex-start",
+    paddingTop: 52,
+    paddingHorizontal: 16,
+    zIndex: 20,
+  },
+  ridersClosedCard: {
+    backgroundColor: "rgba(255,255,255,0.98)",
+    borderRadius: 16,
+    padding: 20,
+    borderWidth: 1,
+    borderColor: "#e2e8f0",
+    shadowColor: "#0f172a",
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.1,
+    shadowRadius: 12,
+    elevation: 6,
+  },
+  ridersClosedTitle: { fontSize: 20, fontWeight: "700", color: "#0f172a", marginBottom: 10 },
+  ridersClosedBody: { fontSize: 15, color: "#475569", lineHeight: 22, marginBottom: 16 },
   waitingLayer: {
     ...StyleSheet.absoluteFillObject,
     justifyContent: "center",
