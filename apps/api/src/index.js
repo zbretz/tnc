@@ -14,6 +14,7 @@ import { seedDevDriversIfNeeded } from "./seedDevDrivers.js";
 import { ensureAppSettings, getRiderServiceConfig } from "./models/AppSettings.js";
 import { createAdminRouter } from "./routes/admin.js";
 import { routesRouter } from "./routes/routes.js";
+import { pricingRouter } from "./routes/pricing.js";
 
 const PORT = Number(process.env.PORT) || 3000;
 // const MONGODB_URI = process.env.MONGODB_URI || "mongodb://127.0.0.1:27017/tnc";
@@ -55,6 +56,7 @@ app.use("/auth", authRouter);
 app.use("/trips", tripsRouter);
 app.use("/admin", adminRouter);
 app.use("/routes", routesRouter);
+app.use("/pricing", pricingRouter);
 
 app.get("/config/rider", async (_req, res) => {
   try {

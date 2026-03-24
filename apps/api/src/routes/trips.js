@@ -6,6 +6,7 @@ import { authMiddleware, requireRole } from "../middleware/auth.js";
 import { serializeTrip } from "../serialize.js";
 import { clearPickupEtaThrottle, tryRefreshPickupEta } from "../pickupEta.js";
 import { getRiderServiceConfig } from "../models/AppSettings.js";
+import { computeFareEstimate } from "../fareEstimate.js";
 
 const POPULATE_DRIVER = { path: "driver", select: "-passwordHash" };
 
@@ -136,7 +137,23 @@ export function createTripsRouter(deps) {
       preferredPickupAt: resolvedPreferredPickupAt,
       status: "requested",
     });
-    const out = serializeTrip(trip);
+    if (dropoffLL) {
+      try {
+        const fare = await computeFareEstimate(pickupLL, dropoffLL);
+        if (fare.ok) {
+          trip.fareEstimate = {
+            currency: fare.estimate.currency,
+            total: fare.estimate.total,
+            breakdown: fare.estimate.breakdown,
+            computedAt: new Date(fare.estimate.computedAt),
+          };
+          await trip.save();
+        }
+      } catch (e) {
+        console.error("[tnc] fare estimate on trip create", e);
+      }
+    }
+    const out = await loadTripSerialized(trip._id);
     deps.onTripCreated(out);
     res.status(201).json({ trip: out });
   });

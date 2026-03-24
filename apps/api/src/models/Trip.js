@@ -21,6 +21,16 @@ const etaToPickupSchema = new mongoose.Schema(
   { _id: false }
 );
 
+const fareEstimateSchema = new mongoose.Schema(
+  {
+    currency: { type: String, default: "USD" },
+    total: Number,
+    breakdown: mongoose.Schema.Types.Mixed,
+    computedAt: Date,
+  },
+  { _id: false }
+);
+
 const tripSchema = new mongoose.Schema(
   {
     rider: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
@@ -42,6 +52,8 @@ const tripSchema = new mongoose.Schema(
     },
     /** Server-computed driving ETA to pickup (Distance Matrix); pushed via trip:updated */
     etaToPickup: { type: etaToPickupSchema, default: null },
+    /** Snapshot from computeFareEstimate at trip creation when dropoff is set */
+    fareEstimate: { type: fareEstimateSchema, default: null },
   },
   { timestamps: true }
 );

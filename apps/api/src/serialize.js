@@ -131,6 +131,16 @@ export function serializeTrip(t, options = {}) {
           },
         }
       : {}),
+    ...(t.fareEstimate?.computedAt && typeof t.fareEstimate.total === "number"
+      ? {
+          fareEstimate: {
+            currency: t.fareEstimate.currency || "USD",
+            total: t.fareEstimate.total,
+            breakdown: t.fareEstimate.breakdown,
+            computedAt: t.fareEstimate.computedAt.toISOString(),
+          },
+        }
+      : {}),
     createdAt: t.createdAt.toISOString(),
     updatedAt: t.updatedAt.toISOString(),
   };

@@ -269,6 +269,8 @@ export default function App() {
   const [regPhone, setRegPhone] = useState("");
   const [planRouteCoords, setPlanRouteCoords] = useState(null);
   const [tripRouteCoords, setTripRouteCoords] = useState(null);
+  /** null | { kind: "loading" } | { kind: "ok", estimate } | { kind: "err" } */
+  const [farePreview, setFarePreview] = useState(null);
   const socketRef = useRef(null);
   const tripIdRef = useRef(null);
   const mapRef = useRef(null);
@@ -419,6 +421,39 @@ export default function App() {
   }, [token, trip, pickup?.lat, pickup?.lng, dropoff?.lat, dropoff?.lng]);
 
   useEffect(() => {
+    if (!token || trip || !pickup || !dropoff) {
+      setFarePreview(null);
+      return;
+    }
+    if (![pickup.lat, pickup.lng, dropoff.lat, dropoff.lng].every((n) => Number.isFinite(Number(n)))) {
+      setFarePreview(null);
+      return;
+    }
+    let cancelled = false;
+    setFarePreview({ kind: "loading" });
+    const tid = setTimeout(async () => {
+      try {
+        const data = await api("/pricing/estimate", {
+          method: "POST",
+          token,
+          body: {
+            pickup: { lat: Number(pickup.lat), lng: Number(pickup.lng) },
+            dropoff: { lat: Number(dropoff.lat), lng: Number(dropoff.lng) },
+          },
+        });
+        if (!cancelled && data?.estimate) setFarePreview({ kind: "ok", estimate: data.estimate });
+        else if (!cancelled) setFarePreview({ kind: "err" });
+      } catch {
+        if (!cancelled) setFarePreview({ kind: "err" });
+      }
+    }, 550);
+    return () => {
+      cancelled = true;
+      clearTimeout(tid);
+    };
+  }, [token, trip, pickup?.lat, pickup?.lng, dropoff?.lat, dropoff?.lng]);
+
+  useEffect(() => {
     if (!token || !trip?.pickup) {
       setTripRouteCoords(null);
       return;
@@ -555,6 +590,7 @@ export default function App() {
     setBookingStep("pickup");
     setPlanEntryMode("map");
     setPickupOffsetMinutes(0);
+    setFarePreview(null);
     socketRef.current?.disconnect();
   };
 
@@ -1171,6 +1207,19 @@ export default function App() {
                       <Text style={styles.smallBtnText}>Clear dropoff</Text>
                     </Pressable>
                   ) : null}
+                  {farePreview?.kind === "loading" ? (
+                    <Text style={styles.farePreviewText}>Estimating fare…</Text>
+                  ) : farePreview?.kind === "ok" ? (
+                    <Text style={styles.farePreviewText}>
+                      Estimated fare: {farePreview.estimate.currency === "USD" ? "$" : ""}
+                      {farePreview.estimate.total.toFixed(2)}
+                      {farePreview.estimate.breakdown?.trip?.durationText
+                        ? ` · ~${farePreview.estimate.breakdown.trip.durationText} trip`
+                        : ""}
+                    </Text>
+                  ) : farePreview?.kind === "err" ? (
+                    <Text style={styles.farePreviewMuted}>Fare estimate unavailable (check Distance Matrix key).</Text>
+                  ) : null}
                 </>
               )}
             </View>
@@ -1227,6 +1276,12 @@ export default function App() {
             <View style={styles.addrBox}>
               <Text style={styles.addrText}>Pickup: {trip?.pickupAddress || "Not available"}</Text>
               <Text style={styles.addrText}>Dropoff: {trip?.dropoffAddress || "Not set"}</Text>
+              {trip?.fareEstimate?.total != null ? (
+                <Text style={styles.farePreviewText}>
+                  Fare (at request): {trip.fareEstimate.currency === "USD" ? "$" : ""}
+                  {Number(trip.fareEstimate.total).toFixed(2)}
+                </Text>
+              ) : null}
             </View>
           </>
         )}
@@ -1498,6 +1553,8 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   addrText: { color: "#334155", fontSize: 13 },
+  farePreviewText: { color: "#0f172a", fontSize: 14, fontWeight: "700" },
+  farePreviewMuted: { color: "#64748b", fontSize: 13 },
   addrInput: {
     backgroundColor: "#fff",
     borderWidth: 1,

@@ -94,3 +94,89 @@ export async function getDrivingDurationToDestination(origin, destination, apiKe
     distanceText: typeof distanceText === "string" ? distanceText : null,
   };
 }
+
+/**
+ * One matrix row: origin → many destinations (same order as `destinations` array).
+ * Uses departure_time=now when supported.
+ */
+export async function getDrivingDurationsOneToMany(origin, destinations, apiKey) {
+  if (!apiKey || typeof apiKey !== "string") {
+    return { ok: false, error: "missing_key", results: [] };
+  }
+  const oLat = Number(origin?.lat);
+  const oLng = Number(origin?.lng);
+  if (!Number.isFinite(oLat) || !Number.isFinite(oLng)) {
+    return { ok: false, error: "invalid_origin", results: [] };
+  }
+  if (!Array.isArray(destinations) || destinations.length === 0) {
+    return { ok: false, error: "no_destinations", results: [] };
+  }
+
+  const destParts = [];
+  for (const d of destinations) {
+    const dLat = Number(d?.lat);
+    const dLng = Number(d?.lng);
+    if (!Number.isFinite(dLat) || !Number.isFinite(dLng)) {
+      return { ok: false, error: "invalid_destination", results: [] };
+    }
+    destParts.push(`${dLat},${dLng}`);
+  }
+
+  const params = new URLSearchParams();
+  params.set("origins", `${oLat},${oLng}`);
+  params.set("destinations", destParts.join("|"));
+  params.set("mode", "driving");
+  params.set("units", "metric");
+  params.set("departure_time", "now");
+  params.set("key", apiKey);
+  const url = `https://maps.googleapis.com/maps/api/distancematrix/json?${params.toString()}`;
+
+  let res;
+  try {
+    res = await fetch(url);
+  } catch {
+    return { ok: false, error: "network", results: [] };
+  }
+
+  let data;
+  try {
+    data = await res.json();
+  } catch {
+    return { ok: false, error: "bad_response", results: [] };
+  }
+
+  if (data?.status !== "OK") {
+    return { ok: false, error: data?.error_message || data?.status || "matrix_failed", results: [] };
+  }
+
+  const row = data?.rows?.[0]?.elements;
+  if (!Array.isArray(row) || row.length !== destinations.length) {
+    return { ok: false, error: "row_mismatch", results: [] };
+  }
+
+  const results = row.map((el) => {
+    if (!el || el.status !== "OK") {
+      return { ok: false, error: el?.status || "no_route" };
+    }
+    const baseSec = el.duration?.value;
+    const trafficSec = el.duration_in_traffic?.value;
+    const sec =
+      typeof trafficSec === "number" && Number.isFinite(trafficSec) ? trafficSec : baseSec;
+    if (typeof sec !== "number" || !Number.isFinite(sec)) {
+      return { ok: false, error: "no_duration" };
+    }
+    return {
+      ok: true,
+      durationSeconds: sec,
+      durationText:
+        typeof el.duration_in_traffic?.text === "string" && el.duration_in_traffic.text.trim()
+          ? el.duration_in_traffic.text
+          : typeof el.duration?.text === "string"
+            ? el.duration.text
+            : null,
+      usesTraffic: typeof trafficSec === "number" && Number.isFinite(trafficSec),
+    };
+  });
+
+  return { ok: true, results };
+}

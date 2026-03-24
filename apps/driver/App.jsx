@@ -1024,6 +1024,9 @@ export default function App() {
             {` Flag icon = dropoff when set.\nPickup: ${pickupLabel(previewTrip)}`}
             {dropoffLabel(previewTrip) ? `\nDropoff: ${dropoffLabel(previewTrip)}` : "\nNo dropoff set on this request."}
             {`\n${preferredPickupLabel(previewTrip)}`}
+            {previewTrip.fareEstimate?.total != null
+              ? `\nEst. fare: $${Number(previewTrip.fareEstimate.total).toFixed(2)}`
+              : ""}
             {previewTrip.riderPhone ? `\nRider phone: ${previewTrip.riderPhone}` : ""}
           </Text>
           <View style={styles.row}>
@@ -1120,6 +1123,11 @@ export default function App() {
             </Text>
             <Text style={styles.cardMeta}>Dropoff: {dropoffLabel(item) || "Not set"}</Text>
             <Text style={styles.cardMeta}>{preferredPickupLabel(item)}</Text>
+            {item.fareEstimate?.total != null ? (
+              <Text style={styles.cardMeta}>
+                Est. fare: ${Number(item.fareEstimate.total).toFixed(2)}
+              </Text>
+            ) : null}
             {item.riderPhone ? (
               <Text style={styles.cardPhone}>Rider phone: {item.riderPhone}</Text>
             ) : null}
