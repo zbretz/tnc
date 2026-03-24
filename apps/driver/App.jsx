@@ -117,6 +117,56 @@ function openMapsNavigation(lat, lng, label) {
   Linking.openURL(`https://www.google.com/maps/dir/?api=1&destination=${la},${lo}`).catch(fail);
 }
 
+async function fetchDrivingPreviewCoords(token, from, to) {
+  if (!from || !to || !token) return null;
+  const fla = Number(from.lat);
+  const flo = Number(from.lng);
+  const tla = Number(to.lat);
+  const tlo = Number(to.lng);
+  if (![fla, flo, tla, tlo].every((n) => Number.isFinite(n))) return null;
+  const params = new URLSearchParams({
+    fromLat: String(fla),
+    fromLng: String(flo),
+    toLat: String(tla),
+    toLng: String(tlo),
+  });
+  try {
+    const data = await api(`/routes/driving-preview?${params.toString()}`, { token });
+    if (Array.isArray(data.coordinates) && data.coordinates.length >= 2) {
+      return data.coordinates
+        .map((c) => ({
+          latitude: Number(c.lat),
+          longitude: Number(c.lng),
+        }))
+        .filter((c) => Number.isFinite(c.latitude) && Number.isFinite(c.longitude));
+    }
+  } catch {
+    /* fall back to chord */
+  }
+  return null;
+}
+
+/** Straight segment when Directions is unavailable. */
+function chordDrivingLine(trip, me, enRouteDropoff) {
+  if (!trip?.pickup) return [];
+  const p = trip.pickup;
+  if (!Number.isFinite(p.lat) || !Number.isFinite(p.lng)) return [];
+  if (me?.lat == null || !Number.isFinite(me.lat) || !Number.isFinite(me.lng)) return [];
+  if (enRouteDropoff) {
+    const d = trip.dropoff;
+    const hasDrop = d?.lat != null && d?.lng != null && Number.isFinite(d.lat) && Number.isFinite(d.lng);
+    if (!hasDrop) return [];
+    return [
+      { latitude: me.lat, longitude: me.lng },
+      { latitude: d.lat, longitude: d.lng },
+    ];
+  }
+  return [
+    { latitude: me.lat, longitude: me.lng },
+    { latitude: p.lat, longitude: p.lng },
+  ];
+}
+
 export default function App() {
   const [token, setToken] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -130,6 +180,8 @@ export default function App() {
   const [devRefreshing, setDevRefreshing] = useState(false);
   const [adminRiderCfg, setAdminRiderCfg] = useState(null);
   const [adminClosedMsgDraft, setAdminClosedMsgDraft] = useState("");
+  const [activeDrivingCoords, setActiveDrivingCoords] = useState(null);
+  const [previewDrivingCoords, setPreviewDrivingCoords] = useState(null);
   const socketRef = useRef(null);
   const watchRef = useRef(null);
   const mapRef = useRef(null);
@@ -142,6 +194,15 @@ export default function App() {
     (t) => compactAddress(t?.dropoffAddress) || (t?.dropoff ? formatPoint(t.dropoff) : null),
     [formatPoint]
   );
+
+  /** ~100m grid so driver leg refetches occasionally while en route, not every GPS tick. */
+  const meForRoute = useMemo(() => {
+    if (me?.lat == null || me?.lng == null) return null;
+    const lat = Number(me.lat);
+    const lng = Number(me.lng);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+    return { lat: Number(lat.toFixed(3)), lng: Number(lng.toFixed(3)) };
+  }, [me?.lat, me?.lng]);
 
   const openNavigatePickupFor = useCallback(
     (t) => {
@@ -224,6 +285,80 @@ export default function App() {
     },
     [token]
   );
+
+  useEffect(() => {
+    if (!token || !activeTrip) {
+      setActiveDrivingCoords(null);
+      return;
+    }
+    const st = activeTrip.status || "";
+    const p = activeTrip.pickup;
+    const d = activeTrip.dropoff;
+    const hasDrop = d?.lat != null && d?.lng != null && Number.isFinite(d.lat) && Number.isFinite(d.lng);
+    if (!p?.lat || !Number.isFinite(p.lat) || !Number.isFinite(p.lng)) {
+      setActiveDrivingCoords(null);
+      return;
+    }
+    const enRouteDropoff = st === "in_progress";
+    const from = meForRoute;
+    const to = enRouteDropoff ? d : p;
+    if (!from || !to || (enRouteDropoff && !hasDrop)) {
+      setActiveDrivingCoords(null);
+      return;
+    }
+    let cancelled = false;
+    const delay = enRouteDropoff ? 500 : 0;
+    const tid = setTimeout(async () => {
+      const coords = await fetchDrivingPreviewCoords(token, from, to);
+      if (!cancelled) setActiveDrivingCoords(coords);
+    }, delay);
+    return () => {
+      cancelled = true;
+      clearTimeout(tid);
+    };
+  }, [
+    token,
+    activeTrip?._id,
+    activeTrip?.status,
+    activeTrip?.pickup?.lat,
+    activeTrip?.pickup?.lng,
+    activeTrip?.dropoff?.lat,
+    activeTrip?.dropoff?.lng,
+    meForRoute?.lat,
+    meForRoute?.lng,
+  ]);
+
+  useEffect(() => {
+    if (!token || !previewTrip?._id) {
+      setPreviewDrivingCoords(null);
+      return;
+    }
+    const p = previewTrip.pickup;
+    const d = previewTrip.dropoff;
+    if (
+      !p?.lat ||
+      !d?.lat ||
+      ![p.lat, p.lng, d.lat, d.lng].every((n) => Number.isFinite(Number(n)))
+    ) {
+      setPreviewDrivingCoords(null);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      const coords = await fetchDrivingPreviewCoords(token, p, d);
+      if (!cancelled) setPreviewDrivingCoords(coords);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    token,
+    previewTrip?._id,
+    previewTrip?.pickup?.lat,
+    previewTrip?.pickup?.lng,
+    previewTrip?.dropoff?.lat,
+    previewTrip?.dropoff?.lng,
+  ]);
 
   const loadDevDrivers = useCallback(async () => {
     try {
@@ -655,6 +790,9 @@ export default function App() {
       activeTrip.dropoff?.lng != null &&
       Number.isFinite(activeTrip.dropoff.lat) &&
       Number.isFinite(activeTrip.dropoff.lng);
+    const activeChord = chordDrivingLine(activeTrip, me, enRouteDropoff);
+    const activeLineCoords =
+      activeDrivingCoords?.length >= 2 ? activeDrivingCoords : activeChord;
 
     return (
       <View style={styles.container}>
@@ -665,25 +803,8 @@ export default function App() {
           provider={PROVIDER_GOOGLE}
           initialRegion={region}
         >
-          {!enRouteDropoff && hasDrop ? (
-            <Polyline
-              coordinates={[
-                { latitude: activeTrip.pickup.lat, longitude: activeTrip.pickup.lng },
-                { latitude: activeTrip.dropoff.lat, longitude: activeTrip.dropoff.lng },
-              ]}
-              strokeColor="#7c3aed"
-              strokeWidth={4}
-            />
-          ) : null}
-          {enRouteDropoff && me && hasDrop ? (
-            <Polyline
-              coordinates={[
-                { latitude: me.lat, longitude: me.lng },
-                { latitude: activeTrip.dropoff.lat, longitude: activeTrip.dropoff.lng },
-              ]}
-              strokeColor="#7c3aed"
-              strokeWidth={4}
-            />
+          {activeLineCoords.length >= 2 ? (
+            <Polyline coordinates={activeLineCoords} strokeColor="#7c3aed" strokeWidth={4} />
           ) : null}
           {!enRouteDropoff ? (
             <Marker
@@ -720,7 +841,7 @@ export default function App() {
           <Text style={styles.banner}>
             {enRouteDropoff
               ? "En route to dropoff — map shows you and the destination only. Purple line: remaining leg."
-              : "En route to pickup — map shows you and the rider pickup (dropoff is not used to frame the map). Full purple line previews the trip route."}
+              : "En route to pickup — map shows you and the rider pickup (dropoff is not used to frame the map). Purple line shows your pickup approach."}
             {`\nPickup: ${pickupLabel(activeTrip)}`}
             {dropoffLabel(activeTrip) ? `\nDropoff: ${dropoffLabel(activeTrip)}` : ""}
             {!enRouteDropoff && activeTrip?.etaToPickup
@@ -765,19 +886,25 @@ export default function App() {
   }
 
   if (previewTrip && previewRegion) {
+    const previewChord =
+      previewTrip?.pickup &&
+      previewTrip?.dropoff &&
+      [previewTrip.pickup.lat, previewTrip.pickup.lng, previewTrip.dropoff.lat, previewTrip.dropoff.lng].every((n) =>
+        Number.isFinite(Number(n))
+      )
+        ? [
+            { latitude: previewTrip.pickup.lat, longitude: previewTrip.pickup.lng },
+            { latitude: previewTrip.dropoff.lat, longitude: previewTrip.dropoff.lng },
+          ]
+        : [];
+    const previewLineCoords =
+      previewDrivingCoords?.length >= 2 ? previewDrivingCoords : previewChord;
     return (
       <View style={styles.container}>
         <StatusBar style="dark" />
         <MapView style={StyleSheet.absoluteFill} provider={PROVIDER_GOOGLE} initialRegion={previewRegion}>
-          {previewTrip.dropoff?.lat != null && previewTrip.dropoff?.lng != null ? (
-            <Polyline
-              coordinates={[
-                { latitude: previewTrip.pickup.lat, longitude: previewTrip.pickup.lng },
-                { latitude: previewTrip.dropoff.lat, longitude: previewTrip.dropoff.lng },
-              ]}
-              strokeColor="#7c3aed"
-              strokeWidth={4}
-            />
+          {previewLineCoords.length >= 2 ? (
+            <Polyline coordinates={previewLineCoords} strokeColor="#7c3aed" strokeWidth={4} />
           ) : null}
           <Marker
             coordinate={{

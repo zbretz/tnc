@@ -10,7 +10,7 @@ import {
   TextInput,
   View,
 } from "react-native";
-import MapView, { Marker, PROVIDER_GOOGLE } from "react-native-maps";
+import MapView, { Marker, Polyline, PROVIDER_GOOGLE } from "react-native-maps";
 import LottieView from "lottie-react-native";
 import * as Location from "expo-location";
 import AsyncStorage from "@react-native-async-storage/async-storage";
@@ -63,6 +63,35 @@ async function api(path, opts = {}) {
     throw new Error(data.error || text || `HTTP ${res.status}`);
   }
   return data;
+}
+
+async function fetchDrivingPreviewCoords(token, from, to) {
+  if (!from || !to || !token) return null;
+  const fla = Number(from.lat);
+  const flo = Number(from.lng);
+  const tla = Number(to.lat);
+  const tlo = Number(to.lng);
+  if (![fla, flo, tla, tlo].every((n) => Number.isFinite(n))) return null;
+  const params = new URLSearchParams({
+    fromLat: String(fla),
+    fromLng: String(flo),
+    toLat: String(tla),
+    toLng: String(tlo),
+  });
+  try {
+    const data = await api(`/routes/driving-preview?${params.toString()}`, { token });
+    if (Array.isArray(data.coordinates) && data.coordinates.length >= 2) {
+      return data.coordinates
+        .map((c) => ({
+          latitude: Number(c.lat),
+          longitude: Number(c.lng),
+        }))
+        .filter((c) => Number.isFinite(c.latitude) && Number.isFinite(c.longitude));
+    }
+  } catch {
+    /* chord fallback */
+  }
+  return null;
 }
 
 async function fetchRiderServicePublic() {
@@ -173,6 +202,8 @@ export default function App() {
   const [driverLive, setDriverLive] = useState(null);
   const [riderService, setRiderService] = useState({ driversAvailable: true, closedMessage: "" });
   const [regPhone, setRegPhone] = useState("");
+  const [planRouteCoords, setPlanRouteCoords] = useState(null);
+  const [tripRouteCoords, setTripRouteCoords] = useState(null);
   const socketRef = useRef(null);
   const tripIdRef = useRef(null);
   const mapRef = useRef(null);
@@ -204,6 +235,27 @@ export default function App() {
     tripIdRef.current = trip?._id != null ? String(trip._id) : null;
   }, [trip?._id]);
 
+  const applyIncomingTrip = useCallback((nextTrip) => {
+    if (!nextTrip) return;
+    if (nextTrip.status === "cancelled" || nextTrip.status === "completed") {
+      setTrip(null);
+      setDriverLive(null);
+      return;
+    }
+    setTrip((prev) => {
+      if (!prev || String(prev._id) !== String(nextTrip._id)) return nextTrip;
+      const merged = { ...prev, ...nextTrip };
+      if (prev.driverProfile && !nextTrip.driverProfile) merged.driverProfile = prev.driverProfile;
+      return merged;
+    });
+    if (nextTrip.driverLocation) {
+      setDriverLive({
+        lat: nextTrip.driverLocation.lat,
+        lng: nextTrip.driverLocation.lng,
+      });
+    }
+  }, []);
+
   useEffect(() => {
     if (!token) {
       socketRef.current?.disconnect();
@@ -227,26 +279,7 @@ export default function App() {
     s.on("riderService:updated", applyRiderService);
 
     s.on("trip:updated", (msg) => {
-      if (msg?.trip) {
-        if (msg.trip.status === "cancelled" || msg.trip.status === "completed") {
-          setTrip(null);
-          setDriverLive(null);
-          return;
-        }
-        setTrip((prev) => {
-          const next = msg.trip;
-          if (!prev || String(prev._id) !== String(next._id)) return next;
-          const merged = { ...prev, ...next };
-          if (prev.driverProfile && !next.driverProfile) merged.driverProfile = prev.driverProfile;
-          return merged;
-        });
-        if (msg.trip.driverLocation) {
-          setDriverLive({
-            lat: msg.trip.driverLocation.lat,
-            lng: msg.trip.driverLocation.lng,
-          });
-        }
-      }
+      if (msg?.trip) applyIncomingTrip(msg.trip);
     });
     s.on("driver:location", (msg) => {
       if (typeof msg?.lat === "number" && typeof msg?.lng === "number") {
@@ -263,7 +296,7 @@ export default function App() {
       s.disconnect();
       if (socketRef.current === s) socketRef.current = null;
     };
-  }, [token]);
+  }, [token, applyIncomingTrip]);
 
   useEffect(() => {
     const s = socketRef.current;
@@ -276,6 +309,91 @@ export default function App() {
       }
     };
   }, [token, trip?._id]);
+
+  useEffect(() => {
+    if (!token || !trip?._id) return undefined;
+    if (!["requested", "accepted", "in_progress"].includes(trip.status)) return undefined;
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const out = await api(`/trips/${trip._id}`, { token });
+        if (!cancelled && out?.trip) applyIncomingTrip(out.trip);
+      } catch {
+        /* socket remains primary; polling is best-effort fallback */
+      }
+    };
+    tick();
+    const id = setInterval(tick, 4000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [token, trip?._id, trip?.status, applyIncomingTrip]);
+
+  useEffect(() => {
+    if (!token || trip) {
+      setPlanRouteCoords(null);
+      return;
+    }
+    if (!pickup || !dropoff) {
+      setPlanRouteCoords(null);
+      return;
+    }
+    if (![pickup.lat, pickup.lng, dropoff.lat, dropoff.lng].every((n) => Number.isFinite(Number(n)))) {
+      setPlanRouteCoords(null);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      const coords = await fetchDrivingPreviewCoords(token, pickup, dropoff);
+      if (!cancelled) setPlanRouteCoords(coords);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [token, trip, pickup?.lat, pickup?.lng, dropoff?.lat, dropoff?.lng]);
+
+  useEffect(() => {
+    if (!token || !trip?.pickup) {
+      setTripRouteCoords(null);
+      return;
+    }
+    const st = trip.status || "";
+    const p = trip.pickup;
+    const d = trip.dropoff;
+    const live =
+      trip?.driverLocation?.lat != null && Number.isFinite(Number(trip.driverLocation.lat))
+        ? { lat: Number(trip.driverLocation.lat), lng: Number(trip.driverLocation.lng) }
+        : driverLive?.lat != null && Number.isFinite(Number(driverLive.lat))
+          ? { lat: Number(driverLive.lat), lng: Number(driverLive.lng) }
+          : null;
+    const target = st === "in_progress" ? d : p;
+    const from = live;
+    if (!from || !target || ![from.lat, from.lng, target.lat, target.lng].every((n) => Number.isFinite(Number(n)))) {
+      setTripRouteCoords(null);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      const coords = await fetchDrivingPreviewCoords(token, from, target);
+      if (!cancelled) setTripRouteCoords(coords);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    token,
+    trip?._id,
+    trip?.status,
+    trip?.pickup?.lat,
+    trip?.pickup?.lng,
+    trip?.dropoff?.lat,
+    trip?.dropoff?.lng,
+    trip?.driverLocation?.lat,
+    trip?.driverLocation?.lng,
+    driverLive?.lat,
+    driverLive?.lng,
+  ]);
 
   const login = async () => {
     setBusy(true);
@@ -462,6 +580,64 @@ export default function App() {
   const displayDropoff = trip?.dropoff || dropoff;
   const shownPickupAddress = trip?.pickupAddress || pickupAddressLabel;
   const shownDropoffAddress = trip?.dropoffAddress || dropoffAddressLabel;
+
+  const mapRouteCoords = useMemo(() => {
+    if (trip?.pickup && trip?.dropoff) {
+      const st = trip.status || "";
+      const p = trip.pickup;
+      const d = trip.dropoff;
+      const live =
+        trip?.driverLocation?.lat != null && Number.isFinite(Number(trip.driverLocation.lat))
+          ? { lat: Number(trip.driverLocation.lat), lng: Number(trip.driverLocation.lng) }
+          : driverLive?.lat != null && Number.isFinite(Number(driverLive.lat))
+            ? { lat: Number(driverLive.lat), lng: Number(driverLive.lng) }
+            : null;
+      if (
+        live &&
+        [p.lat, p.lng, d.lat, d.lng, live.lat, live.lng].every((n) => Number.isFinite(Number(n)))
+      ) {
+        const target = st === "in_progress" ? d : p;
+        const chord = [
+          { latitude: live.lat, longitude: live.lng },
+          { latitude: target.lat, longitude: target.lng },
+        ];
+        return tripRouteCoords?.length >= 2 ? tripRouteCoords : chord;
+      }
+    }
+    const hasSelectedDropoffAddress =
+      typeof dropoffAddressLabel === "string" && dropoffAddressLabel.trim().length > 0;
+    if (!trip && bookingStep !== "pickup" && hasSelectedDropoffAddress && displayPickup && displayDropoff) {
+      const p = displayPickup;
+      const d = displayDropoff;
+      if ([p.lat, p.lng, d.lat, d.lng].every((n) => Number.isFinite(Number(n)))) {
+        const chord = [
+          { latitude: p.lat, longitude: p.lng },
+          { latitude: d.lat, longitude: d.lng },
+        ];
+        return planRouteCoords?.length >= 2 ? planRouteCoords : chord;
+      }
+    }
+    return [];
+  }, [
+    trip,
+    trip?.pickup?.lat,
+    trip?.pickup?.lng,
+    trip?.dropoff?.lat,
+    trip?.dropoff?.lng,
+    trip?.status,
+    tripRouteCoords,
+    bookingStep,
+    displayPickup?.lat,
+    displayPickup?.lng,
+    displayDropoff?.lat,
+    displayDropoff?.lng,
+    trip?.driverLocation?.lat,
+    trip?.driverLocation?.lng,
+    driverLive?.lat,
+    driverLive?.lng,
+    dropoffAddressLabel,
+    planRouteCoords,
+  ]);
 
   const setPickupFromAddress = async () => {
     const q = pickupQuery.trim();
@@ -741,7 +917,7 @@ export default function App() {
           }
         }}
       >
-        {displayPickup ? (
+        {displayPickup && (!trip || trip.status !== "in_progress") ? (
           <Marker
             coordinate={{ latitude: displayPickup.lat, longitude: displayPickup.lng }}
             title="Pickup"
@@ -764,6 +940,9 @@ export default function App() {
             anchor={{ x: 0.5, y: 0.5 }}
             image={require("./assets/driver-marker.png")}
           />
+        ) : null}
+        {mapRouteCoords.length >= 2 ? (
+          <Polyline coordinates={mapRouteCoords} strokeColor="#7c3aed" strokeWidth={4} />
         ) : null}
       </MapView>
 

@@ -13,6 +13,7 @@ import { tryRefreshPickupEta } from "./pickupEta.js";
 import { seedDevDriversIfNeeded } from "./seedDevDrivers.js";
 import { ensureAppSettings, getRiderServiceConfig } from "./models/AppSettings.js";
 import { createAdminRouter } from "./routes/admin.js";
+import { routesRouter } from "./routes/routes.js";
 
 const PORT = Number(process.env.PORT) || 3000;
 // const MONGODB_URI = process.env.MONGODB_URI || "mongodb://127.0.0.1:27017/tnc";
@@ -53,6 +54,7 @@ const adminRouter = createAdminRouter({
 app.use("/auth", authRouter);
 app.use("/trips", tripsRouter);
 app.use("/admin", adminRouter);
+app.use("/routes", routesRouter);
 
 app.get("/config/rider", async (_req, res) => {
   try {
