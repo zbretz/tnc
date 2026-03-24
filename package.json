@@ -1,0 +1,17 @@
+{
+  "name": "tnc",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "devDependencies": {
+    "dotenv": "^16.4.5"
+  },
+  "scripts": {
+    "dev:api": "npm run dev -w @tnc/api",
+    "dev:rider": "npx expo start apps/rider --go",
+    "dev:driver": "npx expo start apps/driver --go",
+    "start": "npx expo start apps/rider --go"
+  }
+}
