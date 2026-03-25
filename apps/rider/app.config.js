@@ -6,6 +6,8 @@ module.exports = {
   name: "TNC Rider",
   slug: "tnc-rider",
   version: "1.0.0",
+  /** Reanimated 4 / bottom-sheet require the new architecture in custom dev builds; Expo Go already matches SDK 54. */
+  newArchEnabled: true,
   orientation: "portrait",
   icon: "./assets/icon.png",
   userInterfaceStyle: "light",
@@ -30,6 +32,8 @@ module.exports = {
   },
   android: {
     package: "com.tnc.rider",
+    /** Lets the window resize when the keyboard opens so the bottom sheet can stay visible. */
+    softwareKeyboardLayoutMode: "resize",
     usesCleartextTraffic: true,
     adaptiveIcon: {
       backgroundColor: "#E6F4FE",
@@ -48,6 +52,7 @@ module.exports = {
     favicon: "./assets/favicon.png",
   },
   plugins: [
+    "expo-font",
     [
       "expo-location",
       {

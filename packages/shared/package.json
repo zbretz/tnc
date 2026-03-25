@@ -3,5 +3,10 @@
   "version": "0.0.1",
   "type": "module",
   "main": "index.js",
-  "private": true
+  "private": true,
+  "peerDependencies": {
+    "react": ">=18",
+    "react-native": ">=0.76",
+    "react-native-maps": ">=1.0"
+  }
 }

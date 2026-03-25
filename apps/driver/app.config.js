@@ -49,6 +49,7 @@ module.exports = {
     favicon: "./assets/favicon.png",
   },
   plugins: [
+    "expo-font",
     [
       "expo-location",
       {

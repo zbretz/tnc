@@ -9,3 +9,8 @@ export function getGoogleGeocodingApiKey() {
   const key = Constants.expoConfig?.extra?.googleGeocodingApiKey;
   return typeof key === "string" && key.length > 0 ? key : "";
 }
+
+/** Same key as geocoding; enable "Places API" + billing for autocomplete & place details. */
+export function getGooglePlacesApiKey() {
+  return getGoogleGeocodingApiKey();
+}

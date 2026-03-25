@@ -5,6 +5,15 @@
     "apps/*",
     "packages/*"
   ],
+  "overrides": {
+    "react-native-worklets": "0.5.1",
+    "react-native-reanimated": {
+      "react-native-worklets": "0.5.1"
+    }
+  },
+  "dependencies": {
+    "react-native-worklets": "0.5.1"
+  },
   "devDependencies": {
     "dotenv": "^16.4.5"
   },
