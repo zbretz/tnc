@@ -1,5 +1,5 @@
 import "react-native-reanimated";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
@@ -178,6 +178,13 @@ const PICKUP_TIME_OFFSETS = [0, 20, 40, 60];
 /** Padding inside the map pane (map sits above the bottom sheet). */
 const MAP_EDGE_PADDING = { top: 96, right: 40, bottom: 72, left: 40 };
 
+function finiteMapCoord(lat, lng) {
+  const latitude = Number(lat);
+  const longitude = Number(lng);
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return null;
+  return { latitude, longitude };
+}
+
 /** Extra bottom inset for book ride so pickup + dropoff stay above the planning sheet (height tracks snap). */
 function bookRideFitEdgePadding(planningSheetIndex, bookRideSheetLocked) {
   const top = MAP_EDGE_PADDING.top;
@@ -202,6 +209,39 @@ function bookRideFitEdgePadding(planningSheetIndex, bookRideSheetLocked) {
     left: horizontal,
     bottom: Math.round(SCREEN_HEIGHT * frac) + 64,
   };
+}
+
+/** Bottom inset when the trip summary sheet covers the map (accepted / in_progress / requested). */
+function tripDockFitEdgePadding() {
+  const top = MAP_EDGE_PADDING.top;
+  const horizontal = MAP_EDGE_PADDING.right;
+  const frac = TRIP_BOTTOM_DOCK_MAX_FRACTION;
+  /** Extra space above trip sheet (handle + home indicator + locate FAB band). */
+  const dockClearance = 88;
+  if (!USE_NATIVE_PLANNING_BOTTOM_SHEET) {
+    return {
+      top,
+      right: horizontal,
+      left: horizontal,
+      bottom: Math.max(MAP_EDGE_PADDING.bottom, Math.round(SCREEN_HEIGHT * frac) + dockClearance),
+    };
+  }
+  return {
+    top,
+    right: horizontal,
+    left: horizontal,
+    bottom: Math.round(SCREEN_HEIGHT * frac) + dockClearance,
+  };
+}
+
+/** Sheet banner for accepted or en-route — ETA only (no map legend). */
+function riderAcceptedInProgressBannerCopy(trip, driverCoord) {
+  if (trip?.etaToPickup) {
+    const e = trip.etaToPickup;
+    return `Driver ETA to pickup: ${e.durationText || `~${e.summaryMinutes} min`}${e.distanceText ? ` · ${e.distanceText}` : ""}${e.usesTraffic ? " (traffic)" : ""}`;
+  }
+  if (driverCoord) return "Driver ETA to pickup: updating…";
+  return "Waiting for driver location…";
 }
 
 const RIDER_MAP_CHROME_TOP =
@@ -514,11 +554,16 @@ export default function App() {
   const [regPhone, setRegPhone] = useState("");
   const [planRouteCoords, setPlanRouteCoords] = useState(null);
   const [tripRouteCoords, setTripRouteCoords] = useState(null);
+  /** Frozen once per trip so MapView `initialRegion` does not track live driver (re-renders would fight gestures). */
+  const [tripMapInitialRegion, setTripMapInitialRegion] = useState(null);
   /** null | { kind: "loading" } | { kind: "ok", estimate } | { kind: "err" } */
   const [farePreview, setFarePreview] = useState(null);
   const socketRef = useRef(null);
   const tripIdRef = useRef(null);
   const mapRef = useRef(null);
+  const driverCoordRef = useRef(null);
+  /** Latest trip + endpoints for refit (avoid useCallback deps on `trip` object identity from sockets). */
+  const activeTripCameraCtxRef = useRef({ trip: null, displayPickup: null, displayDropoff: null });
   const programmaticMapMoveRef = useRef(false);
   const lastRegionRef = useRef(null);
   const programmaticClearTimerRef = useRef(null);
@@ -530,6 +575,8 @@ export default function App() {
   /** Shared with MapView tap-to-collapse so we can blur the planning address field. */
   const planAddressInputRef = useRef(null);
   const planningSheetRef = useRef(null);
+  /** One-shot refit when live driver coords first arrive (avoid refitting on every driver tick). */
+  const activeTripDriverInitialFitRef = useRef(false);
   const planningSheetPrevIndexRef = useRef(0);
   /** Synced each render for onPlanningSheetChange (snap count changes on book ride). */
   const planningSnapPointsRef = useRef(PLANNING_SNAP_POINTS);
@@ -1252,6 +1299,7 @@ export default function App() {
 
   const displayPickup = trip?.pickup || pickup;
   const displayDropoff = trip?.dropoff || dropoff;
+  activeTripCameraCtxRef.current = { trip, displayPickup, displayDropoff };
   /** Normalized coords for Marker (avoids string/invalid values; stable key for remount after fit). */
   const dropoffMarkerCoord = useMemo(() => {
     const d = trip?.dropoff || dropoff;
@@ -1657,7 +1705,7 @@ export default function App() {
     (trip?.driverLocation
       ? { lat: trip.driverLocation.lat, lng: trip.driverLocation.lng }
       : null);
-
+  driverCoordRef.current = driverCoord;
 
   const region = useMemo(() => {
     const finitePt = (pt) =>
@@ -1715,6 +1763,21 @@ export default function App() {
     };
   }, [displayPickup, displayDropoff, trip, bookingStep, driverCoord?.lat, driverCoord?.lng]);
 
+  const tripMapSeedKey = trip?._id != null ? String(trip._id) : null;
+  useLayoutEffect(() => {
+    if (!tripMapSeedKey) {
+      setTripMapInitialRegion(null);
+      return;
+    }
+    setTripMapInitialRegion({
+      latitude: region.latitude,
+      longitude: region.longitude,
+      latitudeDelta: region.latitudeDelta,
+      longitudeDelta: region.longitudeDelta,
+    });
+    // Intentionally only trip id: `region` updates every driver ping and would keep resetting native camera.
+  }, [tripMapSeedKey]);
+
   useEffect(() => {
     if (trip) return;
     lastRegionRef.current = {
@@ -1725,40 +1788,74 @@ export default function App() {
     };
   }, [trip, region.latitude, region.longitude, region.latitudeDelta, region.longitudeDelta]);
 
-  /** accepted: pickup + driver (omit dropoff from camera). in_progress: dropoff + driver. */
-  useEffect(() => {
-    if (!trip || !driverCoord) return;
-    if (!["accepted", "in_progress"].includes(trip.status)) return;
+  /**
+   * Fit camera for active trip: requested → pickup+dropoff; accepted → pickup+driver (or P+D until location);
+   * in_progress → dropoff+driver. Uses trip-dock edge padding and numeric coords for Google Maps.
+   */
+  const refitActiveTripCamera = useCallback(() => {
+    const { trip: t, displayPickup: p, displayDropoff: d } = activeTripCameraCtxRef.current;
+    if (!t || !mapRef.current) return;
+    const st = t.status;
+    if (!["requested", "accepted", "in_progress"].includes(st)) return;
 
-    const coords = [];
-    if (trip.status === "in_progress") {
-      if (!displayDropoff) return;
-      coords.push({ latitude: displayDropoff.lat, longitude: displayDropoff.lng });
-      coords.push({ latitude: driverCoord.lat, longitude: driverCoord.lng });
-    } else {
-      if (!displayPickup) return;
-      coords.push({ latitude: displayPickup.lat, longitude: displayPickup.lng });
-      coords.push({ latitude: driverCoord.lat, longitude: driverCoord.lng });
+    const pLL = p ? finiteMapCoord(p.lat, p.lng) : null;
+    const dLL = d ? finiteMapCoord(d.lat, d.lng) : null;
+    const drv = driverCoordRef.current;
+    const drvLL = drv ? finiteMapCoord(drv.lat, drv.lng) : null;
+
+    let coords = null;
+    if (st === "requested") {
+      if (pLL && dLL) coords = [pLL, dLL];
+    } else if (st === "accepted") {
+      if (drvLL && pLL) coords = [pLL, drvLL];
+      else if (pLL && dLL) coords = [pLL, dLL];
+    } else if (st === "in_progress") {
+      if (drvLL && dLL) coords = [dLL, drvLL];
+      else if (pLL && dLL) coords = [pLL, dLL];
     }
+    if (!coords || coords.length < 2) return;
 
-    const t = setTimeout(() => {
-      mapRef.current?.fitToCoordinates(coords, {
-        edgePadding: MAP_EDGE_PADDING,
-        animated: true,
-      });
-    }, 320);
+    markProgrammaticMapMove();
+    mapRef.current.fitToCoordinates(coords, {
+      edgePadding: tripDockFitEdgePadding(),
+      animated: true,
+    });
+  }, [markProgrammaticMapMove]);
 
-    return () => clearTimeout(t);
-  }, [
-    trip?.status,
-    trip?._id,
-    displayPickup?.lat,
-    displayPickup?.lng,
-    driverCoord?.lat,
-    driverCoord?.lng,
-    displayDropoff?.lat,
-    displayDropoff?.lng,
-  ]);
+  useEffect(() => {
+    activeTripDriverInitialFitRef.current = false;
+  }, [trip?._id]);
+
+  useEffect(() => {
+    if (!trip) return;
+    if (!["requested", "accepted", "in_progress"].includes(trip.status)) return;
+
+    const run = () => refitActiveTripCamera();
+    const t1 = setTimeout(run, 100);
+    const t2 = setTimeout(run, 400);
+    const t3 = setTimeout(run, 850);
+    const t4 = setTimeout(run, 1400);
+
+    return () => {
+      clearTimeout(t1);
+      clearTimeout(t2);
+      clearTimeout(t3);
+      clearTimeout(t4);
+    };
+  }, [trip?._id, trip?.status, displayPickup?.lat, displayPickup?.lng, displayDropoff?.lat, displayDropoff?.lng]);
+
+  /** Driver location streams continuously; refitting on every tick fights map gestures. */
+  useEffect(() => {
+    if (!trip || !["accepted", "in_progress"].includes(trip.status)) return;
+    if (activeTripDriverInitialFitRef.current) return;
+    const ok =
+      driverCoord &&
+      Number.isFinite(Number(driverCoord.lat)) &&
+      Number.isFinite(Number(driverCoord.lng));
+    if (!ok) return;
+    activeTripDriverInitialFitRef.current = true;
+    refitActiveTripCamera();
+  }, [trip?._id, trip?.status, driverCoord?.lat, driverCoord?.lng]);
 
   /** Book ride (trip review): fit pickup + dropoff; pad bottom by sheet height; refit after layout. */
   useEffect(() => {
@@ -1821,7 +1918,7 @@ export default function App() {
           : PLANNING_SNAP_HEIGHT_FRACTIONS[clampPlanningSnapIndex(planningSheetIndex)] ?? 0.34;
         return { bottom: SCREEN_HEIGHT * frac + MAP_LOCATE_FAB_SHEET_GAP };
       }
-      if (trip && trip.status !== "requested") {
+      if (trip) {
         return { bottom: SCREEN_HEIGHT * TRIP_BOTTOM_DOCK_MAX_FRACTION + MAP_LOCATE_FAB_SHEET_GAP };
       }
     }
@@ -1983,18 +2080,21 @@ export default function App() {
             <FreeRideBanner onPressWhy={() => setFreeRideWhyOpen(true)} />
           </View>
         ) : null}
-        <View style={StyleSheet.absoluteFill}>
+        <View style={StyleSheet.absoluteFill} collapsable={false}>
           <MapView
             ref={mapRef}
             style={StyleSheet.absoluteFill}
             provider={PROVIDER_GOOGLE}
-            initialRegion={region}
+            initialRegion={trip ? tripMapInitialRegion ?? region : region}
+            onMapReady={() => {
+              if (trip) refitActiveTripCamera();
+            }}
             onRegionChangeComplete={onMapRegionChangeComplete}
             onPress={planningMapGesturesEnabled ? onPlanningMapPress : undefined}
             scrollEnabled={trip || planningMapGesturesEnabled}
             zoomEnabled={trip || planningMapGesturesEnabled}
-            rotateEnabled={trip ? false : planningMapGesturesEnabled}
-            pitchEnabled={trip ? false : planningMapGesturesEnabled}
+            rotateEnabled={trip || planningMapGesturesEnabled}
+            pitchEnabled={trip || planningMapGesturesEnabled}
           >
             {mapRouteCoords.length >= 2 ? (
               <Polyline coordinates={mapRouteCoords} strokeColor="#7c3aed" strokeWidth={4} zIndex={0} />
@@ -2047,16 +2147,7 @@ export default function App() {
           ) : null}
         </View>
 
-        {trip?.status === "requested" ? (
-          <View style={styles.waitingLayer} pointerEvents="box-none">
-            <View style={styles.waitingCard} pointerEvents="auto">
-              <ActivityIndicator size="large" color="#2563eb" style={styles.waitingSpinner} />
-              <Text style={styles.waitingTitle}>Finding a driver</Text>
-              <Text style={styles.waitingSubtitle}>Hang tight — nearby drivers can accept your ride any moment.</Text>
-            </View>
-          </View>
-        ) : null}
-        {trip?.status !== "requested" && !hidePlanningLocateFab ? (
+        {!hidePlanningLocateFab ? (
           <Pressable
             style={[styles.mapLocateFab, mapLocateFabBottomStyle]}
             onPress={centerOnMe}
@@ -2075,10 +2166,17 @@ export default function App() {
             ref={planningSheetRef}
             index={trip ? 0 : clampPlanningIndexToSnapPoints(planningSheetIndex, nativePlanningSheetSnapPoints.length)}
             snapPoints={nativePlanningSheetSnapPoints}
+            enableContentPanningGesture={!trip}
             onChange={(idx) => {
-              if (trip) return;
+              if (trip) {
+                InteractionManager.runAfterInteractions(() => {
+                  setTimeout(() => refitActiveTripCamera(), 180);
+                });
+                return;
+              }
               onPlanningSheetChange(idx);
             }}
+            enableOverDrag={false}
             enablePanDownToClose={false}
             enableDynamicSizing={false}
             enableHandlePanningGesture={!trip && !planningDropoffConfirmed}
@@ -2104,13 +2202,7 @@ export default function App() {
                       {trip.status === "requested"
                         ? "Your request is live. You can still cancel below before a driver accepts."
                         : trip.status === "accepted" || trip.status === "in_progress"
-                          ? `Driver accepted — green P = pickup, purple D = dropoff, car = driver.${
-                              trip?.etaToPickup
-                                ? `\nDriver ETA to pickup: ${trip.etaToPickup.durationText || `~${trip.etaToPickup.summaryMinutes} min`}${trip.etaToPickup.distanceText ? ` · ${trip.etaToPickup.distanceText}` : ""}${trip.etaToPickup.usesTraffic ? " (traffic)" : ""}`
-                                : driverCoord
-                                  ? "\nDriver ETA to pickup: updating…"
-                                  : "\nWaiting for driver location…"
-                            }`
+                          ? riderAcceptedInProgressBannerCopy(trip, driverCoord)
                           : `Trip: ${trip.status}`}
                     </Text>
                     {(trip.status === "accepted" || trip.status === "in_progress") && trip.driverProfile ? (
@@ -2592,13 +2684,7 @@ export default function App() {
                   {trip.status === "requested"
                     ? "Your request is live. You can still cancel below if plans change."
                     : trip.status === "accepted" || trip.status === "in_progress"
-                      ? `Driver accepted — green P = pickup, purple D = dropoff, car = driver.${
-                          trip?.etaToPickup
-                            ? `\nDriver ETA to pickup: ${trip.etaToPickup.durationText || `~${trip.etaToPickup.summaryMinutes} min`}${trip.etaToPickup.distanceText ? ` · ${trip.etaToPickup.distanceText}` : ""}${trip.etaToPickup.usesTraffic ? " (traffic)" : ""}`
-                            : driverCoord
-                              ? "\nDriver ETA to pickup: updating…"
-                              : "\nWaiting for driver location…"
-                        }`
+                      ? riderAcceptedInProgressBannerCopy(trip, driverCoord)
                       : `Trip: ${trip.status}`}
                 </Text>
                 {(trip.status === "accepted" || trip.status === "in_progress") && trip.driverProfile ? (
