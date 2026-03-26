@@ -916,8 +916,8 @@ export default function App() {
         : driverLive?.lat != null && Number.isFinite(Number(driverLive.lat))
           ? { lat: Number(driverLive.lat), lng: Number(driverLive.lng) }
           : null;
-    const target = st === "in_progress" ? d : p;
-    const from = live;
+    const from = st === "requested" ? p : live;
+    const target = st === "requested" ? d : st === "in_progress" ? d : p;
     if (!from || !target || ![from.lat, from.lng, target.lat, target.lng].every((n) => Number.isFinite(Number(n)))) {
       setTripRouteCoords(null);
       return;
@@ -1352,6 +1352,14 @@ export default function App() {
         if (__DEV__) console.warn("[tnc rider] requestRide: InteractionManager callback");
         requestAnimationFrame(() => {
           if (__DEV__) console.warn("[tnc rider] requestRide: calling setTrip now");
+          const carryForwardRoute =
+            planRouteCoords?.length >= 2
+              ? planRouteCoords
+              : [
+                  { latitude: puLat, longitude: puLng },
+                  { latitude: doLat, longitude: doLng },
+                ];
+          setTripRouteCoords(carryForwardRoute);
           setTrip(normalized);
           setDriverLive(null);
           setBusy(false);
@@ -1470,10 +1478,11 @@ export default function App() {
     );
 
   const mapRouteCoords = useMemo(() => {
-    if (trip?.pickup && trip?.dropoff) {
+    if (trip && displayPickup && displayDropoff) {
       const st = trip.status || "";
-      const p = trip.pickup;
-      const d = trip.dropoff;
+      const p = displayPickup;
+      const d = displayDropoff;
+      if (tripRouteCoords?.length >= 2) return tripRouteCoords;
       const live =
         trip?.driverLocation?.lat != null && Number.isFinite(Number(trip.driverLocation.lat))
           ? { lat: Number(trip.driverLocation.lat), lng: Number(trip.driverLocation.lng) }
@@ -1489,7 +1498,13 @@ export default function App() {
           { latitude: live.lat, longitude: live.lng },
           { latitude: target.lat, longitude: target.lng },
         ];
-        return tripRouteCoords?.length >= 2 ? tripRouteCoords : chord;
+        return chord;
+      }
+      if ([p.lat, p.lng, d.lat, d.lng].every((n) => Number.isFinite(Number(n)))) {
+        return [
+          { latitude: Number(p.lat), longitude: Number(p.lng) },
+          { latitude: Number(d.lat), longitude: Number(d.lng) },
+        ];
       }
     }
     if (planningDropoffHasBothCoords) {
@@ -1504,10 +1519,6 @@ export default function App() {
     return [];
   }, [
     trip,
-    trip?.pickup?.lat,
-    trip?.pickup?.lng,
-    trip?.dropoff?.lat,
-    trip?.dropoff?.lng,
     trip?.status,
     tripRouteCoords,
     planningDropoffHasBothCoords,
