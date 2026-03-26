@@ -64,6 +64,8 @@ const TRIP_BOTTOM_DOCK_MAX_FRACTION = 0.44;
 const TRIP_NATIVE_SHEET_SNAP = `${Math.round(TRIP_BOTTOM_DOCK_MAX_FRACTION * 100)}%`;
 /** Space between locate FAB bottom edge and top edge of bottom sheet / dock. */
 const MAP_LOCATE_FAB_SHEET_GAP = 10;
+/** Deferred ms before clearing trip state — same path for accepted vs in_progress so complete/cancel never diverge on native teardown. */
+const RIDER_TRIP_END_DEFER_MS = 320;
 /** Last valid snap index for PLANNING_SNAP_POINTS (dynamic sizing off — indices must stay in range). */
 const PLANNING_SNAP_MAX_INDEX = PLANNING_SNAP_POINTS.length - 1;
 
@@ -175,6 +177,22 @@ function FreeRideBanner({ onPressWhy }) {
 }
 const PICKUP_TIME_OFFSETS = [0, 20, 40, 60];
 
+function formatPickupInLabel(minutes) {
+  if (minutes === 0) return "Pickup now";
+  if (minutes === 1) return "Pickup in 1 min";
+  return `Pickup in ${minutes} mins`;
+}
+
+function formatPickupScheduleSubtitle(minutes, atDate) {
+  if (minutes === 0) return "As soon as you're ready";
+  try {
+    const t = atDate.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+    return `Around ${t}`;
+  } catch {
+    return "";
+  }
+}
+
 /** Padding inside the map pane (map sits above the bottom sheet). */
 const MAP_EDGE_PADDING = { top: 96, right: 40, bottom: 72, left: 40 };
 
@@ -234,11 +252,20 @@ function tripDockFitEdgePadding() {
   };
 }
 
-/** Sheet banner for accepted or en-route — ETA only (no map legend). */
+function formatTripEtaLine(prefix, e) {
+  return `${prefix}: ${e.durationText || `~${e.summaryMinutes} min`}${e.distanceText ? ` · ${e.distanceText}` : ""}${e.usesTraffic ? " (traffic)" : ""}`;
+}
+
+/** Sheet banner for accepted (pickup leg) or in_progress (dropoff leg). */
 function riderAcceptedInProgressBannerCopy(trip, driverCoord) {
+  const st = trip?.status;
+  if (st === "in_progress") {
+    if (trip?.etaToDropoff) return formatTripEtaLine("ETA to destination", trip.etaToDropoff);
+    if (driverCoord) return "ETA to destination: updating…";
+    return "En route to your destination…";
+  }
   if (trip?.etaToPickup) {
-    const e = trip.etaToPickup;
-    return `Driver ETA to pickup: ${e.durationText || `~${e.summaryMinutes} min`}${e.distanceText ? ` · ${e.distanceText}` : ""}${e.usesTraffic ? " (traffic)" : ""}`;
+    return formatTripEtaLine("Driver ETA to pickup", trip.etaToPickup);
   }
   if (driverCoord) return "Driver ETA to pickup: updating…";
   return "Waiting for driver location…";
@@ -522,12 +549,21 @@ export default function App() {
   const pickupTimeOptions = useMemo(() => {
     const now = new Date();
     return PICKUP_TIME_OFFSETS.map((minutes) => {
-      if (minutes === 0) return { key: "asap", minutes, label: "Pickup now", preferredPickupAt: null };
+      if (minutes === 0) {
+        return {
+          key: "asap",
+          minutes,
+          label: formatPickupInLabel(0),
+          subtitle: formatPickupScheduleSubtitle(0, now),
+          preferredPickupAt: null,
+        };
+      }
       const at = new Date(now.getTime() + minutes * 60 * 1000);
       return {
         key: String(minutes),
         minutes,
-        label: `+${minutes}m`,
+        label: formatPickupInLabel(minutes),
+        subtitle: formatPickupScheduleSubtitle(minutes, at),
         preferredPickupAt: at.toISOString(),
       };
     });
@@ -543,6 +579,8 @@ export default function App() {
   }, [pickupTimeOptions, pickupOffsetMinutes]);
 
   const [trip, setTrip] = useState(null);
+  /** True while we are tearing down the trip dock (ignore stray driver:location / refits). */
+  const tripDockClosingRef = useRef(false);
   const [driverLive, setDriverLive] = useState(null);
   const [riderService, setRiderService] = useState({
     driversAvailable: true,
@@ -556,6 +594,12 @@ export default function App() {
   const [tripRouteCoords, setTripRouteCoords] = useState(null);
   /** Frozen once per trip so MapView `initialRegion` does not track live driver (re-renders would fight gestures). */
   const [tripMapInitialRegion, setTripMapInitialRegion] = useState(null);
+  /** Bumped when a ride ends so Gorhom mounts a new BottomSheet instead of swapping trip → planning inside one instance. */
+  const [planningDockMountKey, setPlanningDockMountKey] = useState(0);
+  /** Bumped on every ride end so Google Maps remounts (same teardown whether trip ended from accepted or in_progress). */
+  const [riderMapMountKey, setRiderMapMountKey] = useState(0);
+  /** True = entire map + Gorhom tree unmounted; minimal placeholder only (avoids native teardown race on trip end). */
+  const [rideInterstitialReset, setRideInterstitialReset] = useState(false);
   /** null | { kind: "loading" } | { kind: "ok", estimate } | { kind: "err" } */
   const [farePreview, setFarePreview] = useState(null);
   const socketRef = useRef(null);
@@ -585,6 +629,34 @@ export default function App() {
   const [addressPredictions, setAddressPredictions] = useState([]);
   const [addressPredictionsLoading, setAddressPredictionsLoading] = useState(false);
   const [keyboardInset, setKeyboardInset] = useState(0);
+
+  /** Full planning reset — same baseline as a fresh “Select pickup” session (used after ride ends + on logout). */
+  const resetPlanningToInitialPickup = useCallback(() => {
+    Keyboard.dismiss();
+    planFieldFocusedRef.current = false;
+    setPlanAddressFieldFocused(false);
+    if (addressBlurTimerRef.current) {
+      clearTimeout(addressBlurTimerRef.current);
+      addressBlurTimerRef.current = null;
+    }
+    setAddressPredictions([]);
+    setAddressPredictionsLoading(false);
+    planAddressInputRef.current?.blur?.();
+    setPickup(null);
+    setDropoff(null);
+    setPickupAddressLabel(null);
+    setDropoffAddressLabel(null);
+    setPickupQuery("");
+    setDropoffQuery("");
+    setDropoffBookingCommitted(false);
+    setBookingStep("pickup");
+    setPickupOffsetMinutes(0);
+    setPickupTimeMenuOpen(false);
+    setFarePreview(null);
+    setPlanRouteCoords(null);
+    setTripRouteCoords(null);
+    setPlanningSheetIndex(0);
+  }, [setDropoffBookingCommitted]);
 
   useEffect(() => {
     (async () => {
@@ -642,11 +714,44 @@ export default function App() {
     tripIdRef.current = trip?._id != null ? String(trip._id) : null;
   }, [trip?._id]);
 
+  useEffect(() => {
+    if (!trip) tripDockClosingRef.current = false;
+  }, [trip]);
+
+  /**
+   * One path whenever a ride ends. Caller must set `rideInterstitialReset` true first so map + Gorhom fully unmount
+   * before we clear `trip`; `finally` always clears the interstitial.
+   */
+  const returnToPlanningAfterTripEnds = useCallback((opts) => {
+    const { matchTripId } = opts || {};
+    InteractionManager.runAfterInteractions(() => {
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          setTimeout(() => {
+            try {
+              if (matchTripId != null && tripIdRef.current !== String(matchTripId)) return;
+              setRiderMapMountKey((k) => k + 1);
+              resetPlanningToInitialPickup();
+              setTrip(null);
+              setDriverLive(null);
+              setPlanningDockMountKey((k) => k + 1);
+            } finally {
+              setRideInterstitialReset(false);
+            }
+          }, RIDER_TRIP_END_DEFER_MS);
+        });
+      });
+    });
+  }, [resetPlanningToInitialPickup]);
+
   const applyIncomingTrip = useCallback((nextTrip) => {
     if (!nextTrip) return;
     if (nextTrip.status === "cancelled" || nextTrip.status === "completed") {
-      setTrip(null);
-      setDriverLive(null);
+      setTripRouteCoords(null);
+      if (tripDockClosingRef.current) return;
+      tripDockClosingRef.current = true;
+      setRideInterstitialReset(true);
+      returnToPlanningAfterTripEnds({ matchTripId: nextTrip._id });
       return;
     }
     setTrip((prev) => {
@@ -661,7 +766,7 @@ export default function App() {
         lng: nextTrip.driverLocation.lng,
       });
     }
-  }, []);
+  }, [returnToPlanningAfterTripEnds]);
 
   useEffect(() => {
     if (!token) {
@@ -692,6 +797,7 @@ export default function App() {
       if (msg?.trip) applyIncomingTrip(msg.trip);
     });
     s.on("driver:location", (msg) => {
+      if (tripDockClosingRef.current) return;
       if (typeof msg?.lat === "number" && typeof msg?.lng === "number") {
         setDriverLive({ lat: msg.lat, lng: msg.lng });
       }
@@ -1167,20 +1273,11 @@ export default function App() {
 
   const logout = async () => {
     await AsyncStorage.removeItem(TOKEN_KEY);
+    setRideInterstitialReset(false);
     setToken(null);
     setTrip(null);
     setDriverLive(null);
-    setPickup(null);
-    setDropoff(null);
-    setPickupAddressLabel(null);
-    setDropoffAddressLabel(null);
-    setPickupQuery("");
-    setDropoffQuery("");
-    setDropoffBookingCommitted(false);
-    setBookingStep("pickup");
-    setPickupOffsetMinutes(0);
-    setPickupTimeMenuOpen(false);
-    setFarePreview(null);
+    resetPlanningToInitialPickup();
     socketRef.current?.disconnect();
   };
 
@@ -1273,9 +1370,11 @@ export default function App() {
     const t = trip;
     if (!t) return;
     if (["completed", "cancelled"].includes(t.status)) {
-      setTrip(null);
-      setDriverLive(null);
-      setDropoffBookingCommitted(false);
+      if (!tripDockClosingRef.current) {
+        tripDockClosingRef.current = true;
+        setRideInterstitialReset(true);
+        returnToPlanningAfterTripEnds();
+      }
       return;
     }
     const tripId = [t._id, t.id].find((x) => x != null && String(x).length > 0);
@@ -1287,9 +1386,11 @@ export default function App() {
     setBusy(true);
     try {
       await api("/trips/cancel", { method: "POST", token, body: { tripId: idStr } });
-      setTrip(null);
-      setDriverLive(null);
-      setDropoffBookingCommitted(false);
+      if (!tripDockClosingRef.current) {
+        tripDockClosingRef.current = true;
+        setRideInterstitialReset(true);
+        returnToPlanningAfterTripEnds();
+      }
     } catch (e) {
       Alert.alert("Clear ride failed", e?.message ? String(e.message) : String(e));
     } finally {
@@ -1793,6 +1894,7 @@ export default function App() {
    * in_progress → dropoff+driver. Uses trip-dock edge padding and numeric coords for Google Maps.
    */
   const refitActiveTripCamera = useCallback(() => {
+    if (tripDockClosingRef.current) return;
     const { trip: t, displayPickup: p, displayDropoff: d } = activeTripCameraCtxRef.current;
     if (!t || !mapRef.current) return;
     const st = t.status;
@@ -1983,6 +2085,18 @@ export default function App() {
     );
   }
 
+  if (rideInterstitialReset) {
+    return (
+      <View style={styles.container}>
+        <StatusBar style="dark" />
+        <View style={styles.rideInterstitialRoot}>
+          <ActivityIndicator size="large" color="#2563eb" />
+          <Text style={styles.rideInterstitialText}>Finishing ride…</Text>
+        </View>
+      </View>
+    );
+  }
+
   return (
     <View style={styles.container}>
       <StatusBar style="dark" />
@@ -2038,35 +2152,55 @@ export default function App() {
           <View style={styles.timeMenuRoot}>
             <Pressable style={styles.timeMenuBackdrop} onPress={() => setPickupTimeMenuOpen(false)} />
             <View style={styles.timeMenuSheet}>
-              <Text style={styles.timeMenuTitle}>Pickup time</Text>
-              {pickupTimeOptions.map((opt) => {
-                const active = pickupOffsetMinutes === opt.minutes;
-                return (
-                  <Pressable
-                    key={opt.key}
-                    style={[styles.timeMenuRow, active && styles.timeMenuRowActive]}
-                    onPress={() => {
-                      setPickupOffsetMinutes(opt.minutes);
-                      setPickupTimeMenuOpen(false);
-                    }}
-                  >
-                    <View style={styles.timeMenuRowLabel}>
-                      {opt.minutes === 0 ? (
+              <View style={styles.timeMenuHandle} />
+              <Text style={styles.timeMenuTitle}>When to pick you up</Text>
+              <Text style={styles.timeMenuLead}>Tap an option — we'll match you with a driver for that time.</Text>
+              <View style={styles.timeMenuOptions}>
+                {pickupTimeOptions.map((opt) => {
+                  const active = pickupOffsetMinutes === opt.minutes;
+                  return (
+                    <Pressable
+                      key={opt.key}
+                      style={[styles.timeMenuCard, active && styles.timeMenuCardActive]}
+                      onPress={() => {
+                        setPickupOffsetMinutes(opt.minutes);
+                        setPickupTimeMenuOpen(false);
+                      }}
+                      accessibilityRole="button"
+                      accessibilityLabel={opt.label}
+                      accessibilityHint={opt.subtitle}
+                    >
+                      <View
+                        style={[
+                          styles.timeMenuIconCircle,
+                          active && styles.timeMenuIconCircleActive,
+                        ]}
+                      >
                         <Ionicons
-                          name="time-outline"
-                          size={20}
+                          name={opt.minutes === 0 ? "flash-outline" : "alarm-outline"}
+                          size={22}
                           color={active ? "#1d4ed8" : "#64748b"}
-                          style={styles.timeMenuRowClock}
                         />
-                      ) : null}
-                      <Text style={[styles.timeMenuRowText, active && styles.timeMenuRowTextActive]}>
-                        {opt.label}
-                      </Text>
-                    </View>
-                    {active ? <Text style={styles.timeMenuCheck}>✓</Text> : null}
-                  </Pressable>
-                );
-              })}
+                      </View>
+                      <View style={styles.timeMenuCardTextCol}>
+                        <Text style={[styles.timeMenuCardTitle, active && styles.timeMenuCardTitleActive]}>
+                          {opt.label}
+                        </Text>
+                        {opt.subtitle ? (
+                          <Text style={[styles.timeMenuCardSub, active && styles.timeMenuCardSubActive]}>
+                            {opt.subtitle}
+                          </Text>
+                        ) : null}
+                      </View>
+                      {active ? (
+                        <Ionicons name="checkmark-circle" size={26} color="#2563eb" style={styles.timeMenuCheckIcon} />
+                      ) : (
+                        <View style={styles.timeMenuRadioOuter} />
+                      )}
+                    </Pressable>
+                  );
+                })}
+              </View>
               <Pressable style={styles.timeMenuCancel} onPress={() => setPickupTimeMenuOpen(false)}>
                 <Text style={styles.timeMenuCancelText}>Cancel</Text>
               </Pressable>
@@ -2082,6 +2216,7 @@ export default function App() {
         ) : null}
         <View style={StyleSheet.absoluteFill} collapsable={false}>
           <MapView
+            key={`rmap-${riderMapMountKey}`}
             ref={mapRef}
             style={StyleSheet.absoluteFill}
             provider={PROVIDER_GOOGLE}
@@ -2106,7 +2241,9 @@ export default function App() {
                 </View>
               </Marker>
             ) : null}
-            {pickupMarkerCoord && (!trip || trip.status !== "in_progress") && (trip || bookingStep === "dropoff") ? (
+            {pickupMarkerCoord &&
+            (!trip || trip.status !== "in_progress") &&
+            (trip || bookingStep === "dropoff") ? (
               tripRequested ? (
                 <Marker coordinate={pickupMarkerCoord} title="Pickup" pinColor="#16a34a" />
               ) : (
@@ -2163,6 +2300,7 @@ export default function App() {
 
       {USE_NATIVE_PLANNING_BOTTOM_SHEET ? (
           <BottomSheet
+            key={trip ? `trip-dock-${String(trip._id)}` : `plan-dock-${planningDockMountKey}`}
             ref={planningSheetRef}
             index={trip ? 0 : clampPlanningIndexToSnapPoints(planningSheetIndex, nativePlanningSheetSnapPoints.length)}
             snapPoints={nativePlanningSheetSnapPoints}
@@ -2287,16 +2425,32 @@ export default function App() {
                     style={styles.compactTimeChip}
                     onPress={() => setPickupTimeMenuOpen(true)}
                     accessibilityRole="button"
-                    accessibilityLabel="Pickup time"
+                    accessibilityLabel={selectedPickupTimeLabel}
                     accessibilityHint="Opens pickup time options"
                   >
-                    <View style={styles.compactTimeChipInner}>
-                      {pickupOffsetMinutes === 0 ? (
-                        <Ionicons name="time-outline" size={15} color="#475569" />
-                      ) : null}
-                      <Text style={styles.compactTimeChipValue}>{selectedPickupTimeLabel}</Text>
+                    <View
+                      style={[
+                        styles.compactTimeChipIconWrap,
+                        pickupOffsetMinutes > 0 && styles.compactTimeChipIconWrapScheduled,
+                      ]}
+                    >
+                      <Ionicons
+                        name={pickupOffsetMinutes === 0 ? "flash-outline" : "alarm-outline"}
+                        size={16}
+                        color={pickupOffsetMinutes === 0 ? "#b45309" : "#1d4ed8"}
+                      />
                     </View>
-                    <Text style={styles.compactTimeChevron}>▾</Text>
+                    <View style={styles.compactTimeChipTextCol}>
+                      {pickupOffsetMinutes === 0 ? (
+                        <Text style={styles.compactTimeChipPrimary}>Pickup now</Text>
+                      ) : (
+                        <Text style={styles.compactTimeChipPrimary}>
+                          <Text style={styles.compactTimeChipMuted}>Pickup in </Text>
+                          <Text style={styles.compactTimeChipEmph}>{pickupOffsetMinutes} mins</Text>
+                        </Text>
+                      )}
+                    </View>
+                    <Ionicons name="chevron-down" size={16} color="#94a3b8" />
                   </Pressable>
                 </View>
               ) : null}
@@ -2493,16 +2647,32 @@ export default function App() {
                     style={styles.compactTimeChip}
                     onPress={() => setPickupTimeMenuOpen(true)}
                     accessibilityRole="button"
-                    accessibilityLabel="Pickup time"
+                    accessibilityLabel={selectedPickupTimeLabel}
                     accessibilityHint="Opens pickup time options"
                   >
-                    <View style={styles.compactTimeChipInner}>
-                      {pickupOffsetMinutes === 0 ? (
-                        <Ionicons name="time-outline" size={15} color="#475569" />
-                      ) : null}
-                      <Text style={styles.compactTimeChipValue}>{selectedPickupTimeLabel}</Text>
+                    <View
+                      style={[
+                        styles.compactTimeChipIconWrap,
+                        pickupOffsetMinutes > 0 && styles.compactTimeChipIconWrapScheduled,
+                      ]}
+                    >
+                      <Ionicons
+                        name={pickupOffsetMinutes === 0 ? "flash-outline" : "alarm-outline"}
+                        size={16}
+                        color={pickupOffsetMinutes === 0 ? "#b45309" : "#1d4ed8"}
+                      />
                     </View>
-                    <Text style={styles.compactTimeChevron}>▾</Text>
+                    <View style={styles.compactTimeChipTextCol}>
+                      {pickupOffsetMinutes === 0 ? (
+                        <Text style={styles.compactTimeChipPrimary}>Pickup now</Text>
+                      ) : (
+                        <Text style={styles.compactTimeChipPrimary}>
+                          <Text style={styles.compactTimeChipMuted}>Pickup in </Text>
+                          <Text style={styles.compactTimeChipEmph}>{pickupOffsetMinutes} mins</Text>
+                        </Text>
+                      )}
+                    </View>
+                    <Ionicons name="chevron-down" size={16} color="#94a3b8" />
                   </Pressable>
                 </View>
               ) : null}
@@ -2781,6 +2951,8 @@ const styles = StyleSheet.create({
   mapAreaWhenKeyboard: { flex: 1, minHeight: 100 },
   /** Native planning: map fills space under chrome; gorhom sheet overlays the bottom. */
   mapLayer: { flex: 1, overflow: "hidden" },
+  rideInterstitialRoot: { flex: 1, alignItems: "center", justifyContent: "center", backgroundColor: "#ffffff" },
+  rideInterstitialText: { marginTop: 16, fontSize: 16, ...pj.m, color: "#64748b" },
   planningBottomSheetBg: {
     backgroundColor: "#ffffff",
     borderTopLeftRadius: 16,
@@ -2897,17 +3069,35 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     flexShrink: 0,
-    backgroundColor: "#f1f5f9",
-    borderWidth: 1,
+    maxWidth: 168,
+    backgroundColor: "#fff",
+    borderWidth: 1.5,
     borderColor: "#e2e8f0",
-    borderRadius: 8,
-    paddingVertical: 5,
-    paddingHorizontal: 9,
-    gap: 5,
+    borderRadius: 12,
+    paddingVertical: 7,
+    paddingHorizontal: 10,
+    gap: 8,
+    shadowColor: "#0f172a",
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.06,
+    shadowRadius: 3,
+    elevation: 2,
   },
-  compactTimeChipInner: { flexDirection: "row", alignItems: "center", gap: 5 },
-  compactTimeChipValue: { fontSize: 13, ...pj.b, color: "#0f172a" },
-  compactTimeChevron: { fontSize: 11, color: "#64748b", ...pj.b, marginTop: 1 },
+  compactTimeChipIconWrap: {
+    width: 30,
+    height: 30,
+    borderRadius: 9,
+    backgroundColor: "#fffbeb",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  compactTimeChipIconWrapScheduled: {
+    backgroundColor: "#eff6ff",
+  },
+  compactTimeChipTextCol: { flex: 1, minWidth: 0, justifyContent: "center" },
+  compactTimeChipPrimary: { fontSize: 12, ...pj.sb, color: "#0f172a", lineHeight: 15 },
+  compactTimeChipMuted: { ...pj.m, color: "#64748b", fontWeight: "normal" },
+  compactTimeChipEmph: { ...pj.sb, color: "#1d4ed8" },
   setPickupButton: {
     width: "100%",
     alignItems: "center",
@@ -3328,54 +3518,113 @@ const styles = StyleSheet.create({
   },
   timeMenuBackdrop: {
     ...StyleSheet.absoluteFillObject,
-    backgroundColor: "rgba(15,23,42,0.45)",
+    backgroundColor: "rgba(15,23,42,0.5)",
   },
   timeMenuSheet: {
-    backgroundColor: "#fff",
-    borderTopLeftRadius: 16,
-    borderTopRightRadius: 16,
-    paddingBottom: Platform.OS === "ios" ? 28 : 20,
-    paddingTop: 12,
-    borderWidth: 1,
+    backgroundColor: "#f8fafc",
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    paddingBottom: Platform.OS === "ios" ? 32 : 22,
+    paddingTop: 8,
+    borderTopWidth: 1,
+    borderLeftWidth: 1,
+    borderRightWidth: 1,
     borderColor: "#e2e8f0",
+    shadowColor: "#0f172a",
+    shadowOffset: { width: 0, height: -4 },
+    shadowOpacity: 0.08,
+    shadowRadius: 12,
+    elevation: 16,
+  },
+  timeMenuHandle: {
+    alignSelf: "center",
+    width: 40,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: "#cbd5e1",
+    marginBottom: 14,
   },
   timeMenuTitle: {
-    fontSize: 13,
+    fontSize: 20,
+    letterSpacing: -0.3,
     ...pj.b,
+    color: "#0f172a",
+    paddingHorizontal: 20,
+    marginBottom: 6,
+  },
+  timeMenuLead: {
+    fontSize: 14,
+    lineHeight: 20,
+    ...pj.r,
     color: "#64748b",
-    textTransform: "uppercase",
-    letterSpacing: 0.5,
     paddingHorizontal: 20,
-    paddingBottom: 8,
+    marginBottom: 18,
   },
-  timeMenuRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    paddingVertical: 16,
-    paddingHorizontal: 20,
-    borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: "#e2e8f0",
-  },
-  timeMenuRowLabel: {
-    flex: 1,
-    flexDirection: "row",
-    alignItems: "center",
+  timeMenuOptions: {
+    paddingHorizontal: 16,
     gap: 10,
-    minWidth: 0,
   },
-  timeMenuRowClock: { flexShrink: 0 },
-  timeMenuRowActive: { backgroundColor: "#eff6ff" },
-  timeMenuRowText: { fontSize: 17, color: "#0f172a", ...pj.m, flexShrink: 1 },
-  timeMenuRowTextActive: { color: "#1d4ed8", ...pj.b },
-  timeMenuCheck: { fontSize: 18, color: "#2563eb", ...pj.b },
+  timeMenuCard: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: "#fff",
+    borderRadius: 16,
+    paddingVertical: 14,
+    paddingHorizontal: 14,
+    borderWidth: 1.5,
+    borderColor: "#e2e8f0",
+    gap: 14,
+  },
+  timeMenuCardActive: {
+    borderColor: "#3b82f6",
+    backgroundColor: "#eff6ff",
+    borderWidth: 2,
+  },
+  timeMenuIconCircle: {
+    width: 48,
+    height: 48,
+    borderRadius: 14,
+    backgroundColor: "#f1f5f9",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  timeMenuIconCircleActive: {
+    backgroundColor: "#dbeafe",
+  },
+  timeMenuCardTextCol: { flex: 1, minWidth: 0 },
+  timeMenuCardTitle: {
+    fontSize: 17,
+    letterSpacing: -0.2,
+    ...pj.sb,
+    color: "#0f172a",
+  },
+  timeMenuCardTitleActive: { color: "#1e40af" },
+  timeMenuCardSub: {
+    fontSize: 13,
+    marginTop: 3,
+    ...pj.r,
+    color: "#64748b",
+    lineHeight: 18,
+  },
+  timeMenuCardSubActive: { color: "#3b82f6" },
+  timeMenuCheckIcon: { flexShrink: 0 },
+  timeMenuRadioOuter: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    borderWidth: 2,
+    borderColor: "#cbd5e1",
+    flexShrink: 0,
+  },
   timeMenuCancel: {
-    marginTop: 8,
+    marginTop: 14,
     marginHorizontal: 16,
     paddingVertical: 14,
     alignItems: "center",
-    borderRadius: 10,
-    backgroundColor: "#f1f5f9",
+    borderRadius: 14,
+    backgroundColor: "#fff",
+    borderWidth: 1,
+    borderColor: "#e2e8f0",
   },
   timeMenuCancelText: { fontSize: 16, ...pj.sb, color: "#475569" },
   smallBtn: {
