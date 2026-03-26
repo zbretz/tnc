@@ -1,6 +1,11 @@
 const path = require("path");
 require("dotenv").config({ path: path.resolve(__dirname, "../../.env") });
 
+const googleMapsApiKey =
+  typeof process.env.GOOGLE_MAPS_API_KEY === "string" && process.env.GOOGLE_MAPS_API_KEY.trim().length > 0
+    ? process.env.GOOGLE_MAPS_API_KEY.trim()
+    : undefined;
+
 /** @type {import('expo/config').ExpoConfig} */
 module.exports = {
   name: "TNC Driver",
@@ -25,9 +30,7 @@ module.exports = {
       },
       LSApplicationQueriesSchemes: ["comgooglemaps", "googlechromes"],
     },
-    config: {
-      googleMapsApiKey: process.env.GOOGLE_MAPS_API_KEY || "",
-    },
+    ...(googleMapsApiKey ? { config: { googleMapsApiKey } } : {}),
   },
   android: {
     package: "com.tnc.driver",
@@ -39,11 +42,7 @@ module.exports = {
       monochromeImage: "./assets/android-icon-monochrome.png",
     },
     permissions: ["ACCESS_COARSE_LOCATION", "ACCESS_FINE_LOCATION"],
-    config: {
-      googleMaps: {
-        apiKey: process.env.GOOGLE_MAPS_API_KEY || "",
-      },
-    },
+    ...(googleMapsApiKey ? { config: { googleMaps: { apiKey: googleMapsApiKey } } } : {}),
   },
   web: {
     favicon: "./assets/favicon.png",

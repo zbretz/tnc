@@ -625,6 +625,40 @@ export default function App() {
     setSessionUser(null);
   };
 
+  /** Admin: cancel an open request or any in-progress trip (API allows driver+isAdmin). */
+  const confirmAdminCancelTrip = useCallback(
+    (tripId, contextLabel) => {
+      if (!token || !sessionUser?.isAdmin || !tripId) return;
+      const idStr = String(tripId);
+      Alert.alert(
+        "Cancel ride",
+        contextLabel ||
+          "This cancels the trip for the rider and removes it from the open list. Continue?",
+        [
+          { text: "No", style: "cancel" },
+          {
+            text: "Cancel ride",
+            style: "destructive",
+            onPress: async () => {
+              setBusy(true);
+              try {
+                await api("/trips/cancel", { method: "POST", token, body: { tripId: idStr } });
+                setPreviewTrip((prev) => (prev && String(prev._id) === idStr ? null : prev));
+                setActiveTrip((prev) => (prev && String(prev._id) === idStr ? null : prev));
+                await loadAvailable(token);
+              } catch (e) {
+                Alert.alert("Cancel failed", e?.message ? String(e.message) : String(e));
+              } finally {
+                setBusy(false);
+              }
+            },
+          },
+        ]
+      );
+    },
+    [token, sessionUser?.isAdmin, loadAvailable]
+  );
+
   const accept = async (tripId) => {
     if (!token) return;
     setBusy(true);
@@ -1103,6 +1137,15 @@ export default function App() {
               <Text style={styles.smallBtnText}>Log out</Text>
             </Pressable>
           </View>
+          {sessionUser?.isAdmin ? (
+            <Pressable
+              style={[styles.smallBtn, styles.adminCancelOpenBtn]}
+              onPress={() => confirmAdminCancelTrip(previewTrip._id, "Cancel this open request for everyone?")}
+              disabled={busy}
+            >
+              <Text style={styles.smallBtnTextLight}>Admin: cancel request</Text>
+            </Pressable>
+          ) : null}
         </View>
       </View>
     );
@@ -1302,14 +1345,18 @@ export default function App() {
       </Pressable>
       <FlatList
         data={available}
-        keyExtractor={(item) => item._id}
+        keyExtractor={(item, index) =>
+          item?._id != null && String(item._id).length > 0 ? String(item._id) : `trip-${index}`
+        }
         contentContainerStyle={{ paddingBottom: 24 }}
         ListEmptyComponent={
           <Text style={styles.empty}>No open requests. Keep this screen open — new rides appear via socket.</Text>
         }
         renderItem={({ item }) => (
           <View style={styles.card}>
-            <Text style={styles.cardTitle}>Trip {item._id.slice(-6)}</Text>
+            <Text style={styles.cardTitle}>
+              Trip {String(item?._id != null ? item._id : "").slice(-6) || "—"}
+            </Text>
             <Text style={styles.cardMeta}>
               Pickup: {pickupLabel(item)}
             </Text>
@@ -1331,6 +1378,17 @@ export default function App() {
                 <Text style={styles.acceptBtnText}>Accept</Text>
               </Pressable>
             </View>
+            {sessionUser?.isAdmin ? (
+              <Pressable
+                style={[styles.adminCancelOpenBtnFull, busy && styles.btnDisabled]}
+                onPress={() =>
+                  confirmAdminCancelTrip(item._id, "Cancel this open request? The rider will need to request again.")
+                }
+                disabled={busy}
+              >
+                <Text style={styles.adminCancelOpenBtnText}>Admin: cancel request</Text>
+              </Pressable>
+            ) : null}
           </View>
         )}
       />
@@ -1552,6 +1610,19 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   acceptBtnText: { color: "#fff", ...pj.b },
+  adminCancelOpenBtnFull: {
+    marginTop: 10,
+    backgroundColor: "#b91c1c",
+    paddingVertical: 10,
+    borderRadius: 8,
+    alignItems: "center",
+  },
+  adminCancelOpenBtnText: { color: "#fff", ...pj.sb, fontSize: 14 },
+  adminCancelOpenBtn: {
+    marginTop: 8,
+    alignSelf: "stretch",
+    backgroundColor: "#b91c1c",
+  },
   btnDisabled: { opacity: 0.6 },
   footerBtn: { padding: 16, alignItems: "center" },
   footerBtnText: { color: "#64748b", ...pj.sb },

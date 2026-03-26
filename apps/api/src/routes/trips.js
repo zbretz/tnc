@@ -65,10 +65,12 @@ export function createTripsRouter(deps) {
       return;
     }
     const uid = String(req.userId || "");
+    const actor = await User.findById(uid).select("isAdmin role").lean().exec();
+    const isDriverAdmin = actor?.role === "driver" && actor?.isAdmin === true;
     const isRider = String(trip.rider) === uid;
     const isDriver = trip.driver != null && tripDriverIdString(trip) === uid;
     if (["completed", "cancelled"].includes(trip.status)) {
-      if (!isRider && !isDriver) {
+      if (!isRider && !isDriver && !isDriverAdmin) {
         res.status(403).json({ error: "Forbidden" });
         return;
       }
@@ -76,12 +78,12 @@ export function createTripsRouter(deps) {
       return;
     }
     if (trip.status === "requested") {
-      if (!isRider) {
-        res.status(403).json({ error: "Only the rider can cancel a pending request" });
+      if (!isRider && !isDriverAdmin) {
+        res.status(403).json({ error: "Only the rider or an admin driver can cancel a pending request" });
         return;
       }
     } else if (["accepted", "in_progress"].includes(trip.status)) {
-      if (!isRider && !isDriver) {
+      if (!isRider && !isDriver && !isDriverAdmin) {
         res.status(403).json({ error: "Forbidden" });
         return;
       }

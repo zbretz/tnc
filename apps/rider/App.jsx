@@ -5,6 +5,7 @@ import {
   Alert,
   Dimensions,
   Image,
+  InteractionManager,
   Keyboard,
   Modal,
   Platform,
@@ -26,7 +27,6 @@ import { useFonts } from "expo-font";
 import * as SplashScreen from "expo-splash-screen";
 import { DropoffBeaconMarker, PickupBeaconMarker, FONT_FAMILY } from "@tnc/shared";
 import MapView, { Marker, Polyline, PROVIDER_GOOGLE } from "react-native-maps";
-import LottieView from "lottie-react-native";
 import * as Location from "expo-location";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { io } from "socket.io-client";
@@ -60,6 +60,8 @@ const PLANNING_SNAP_HEIGHT_FRACTIONS = PLANNING_SNAP_POINTS.map((s) => {
 });
 /** Native trip summary dock max height vs screen (see `tripBottomDock`). */
 const TRIP_BOTTOM_DOCK_MAX_FRACTION = 0.44;
+/** Same fraction as snap — keep trip UI inside Gorhom sheet so the sheet never unmounts (avoids iOS native crash). */
+const TRIP_NATIVE_SHEET_SNAP = `${Math.round(TRIP_BOTTOM_DOCK_MAX_FRACTION * 100)}%`;
 /** Space between locate FAB bottom edge and top edge of bottom sheet / dock. */
 const MAP_LOCATE_FAB_SHEET_GAP = 10;
 /** Last valid snap index for PLANNING_SNAP_POINTS (dynamic sizing off — indices must stay in range). */
@@ -308,13 +310,29 @@ function formatAddress(parts) {
   return line1 || fallback || null;
 }
 
+function finiteLatLngObject(p) {
+  if (p == null || typeof p !== "object") return null;
+  const lat = Number(p.lat);
+  const lng = Number(p.lng);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+  return { lat, lng };
+}
+
+/** Ensure trip.pickup / trip.dropoff are plain finite coords (server JSON can be odd). */
+function normalizeTripForClient(t, pickupFallback, dropoffFallback) {
+  const pickup = finiteLatLngObject(t?.pickup) ?? pickupFallback;
+  const dropoff = finiteLatLngObject(t?.dropoff) ?? dropoffFallback;
+  return { ...t, pickup, dropoff };
+}
+
 async function reverseGeocodeLabel(point) {
   if (!point) return null;
+  const lat = Number(point.lat);
+  const lng = Number(point.lng);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
   const apiKey = getGoogleGeocodingApiKey();
   if (apiKey) {
     try {
-      const lat = Number(point.lat);
-      const lng = Number(point.lng);
       const url = `https://maps.googleapis.com/maps/api/geocode/json?latlng=${lat},${lng}&key=${encodeURIComponent(apiKey)}`;
       const res = await fetch(url);
       const data = await res.json();
@@ -334,8 +352,8 @@ async function reverseGeocodeLabel(point) {
   }
   try {
     const out = await Location.reverseGeocodeAsync({
-      latitude: point.lat,
-      longitude: point.lng,
+      latitude: lat,
+      longitude: lng,
     });
     return formatAddress(out?.[0]) || null;
   } catch {
@@ -1146,35 +1164,60 @@ export default function App() {
       Alert.alert("Trip setup", "Set both pickup and dropoff before requesting a ride.");
       return;
     }
+    const puLat = Number(pickup.lat);
+    const puLng = Number(pickup.lng);
+    const doLat = Number(dropoff.lat);
+    const doLng = Number(dropoff.lng);
+    if (![puLat, puLng, doLat, doLng].every((n) => Number.isFinite(n))) {
+      Alert.alert("Trip setup", "Pickup and dropoff need valid map locations. Try editing the addresses.");
+      return;
+    }
     setBusy(true);
+    let clearBusyInFinally = true;
     try {
+      if (__DEV__) console.warn("[tnc rider] requestRide: start (geocode + POST)");
+      const pickupForGeo = { lat: puLat, lng: puLng };
+      const dropoffForGeo = { lat: doLat, lng: doLng };
       const [pickupAddress, dropoffAddress] = await Promise.all([
-        pickupAddressLabel || reverseGeocodeLabel(pickup),
-        dropoff ? dropoffAddressLabel || reverseGeocodeLabel(dropoff) : Promise.resolve(null),
+        pickupAddressLabel || reverseGeocodeLabel(pickupForGeo),
+        dropoffAddressLabel || reverseGeocodeLabel(dropoffForGeo),
       ]);
       const body = {
-        pickup: { lat: Number(pickup.lat), lng: Number(pickup.lng) },
+        pickup: { lat: puLat, lng: puLng },
         pickupOffsetMinutes,
         preferredPickupAt,
         ...(pickupAddress ? { pickupAddress } : {}),
-        ...(dropoff
-          ? {
-              dropoff: { lat: Number(dropoff.lat), lng: Number(dropoff.lng) },
-              ...(dropoffAddress ? { dropoffAddress } : {}),
-            }
-          : {}),
+        dropoff: { lat: doLat, lng: doLng },
+        ...(dropoffAddress ? { dropoffAddress } : {}),
       };
-      const { trip: t } = await api("/trips", {
+      const data = await api("/trips", {
         method: "POST",
         token,
         body,
       });
-      setTrip(t);
-      setDriverLive(null);
+      const t = data?.trip;
+      if (!t || typeof t !== "object" || t._id == null) {
+        Alert.alert("Request failed", "Server did not return a trip. Try again.");
+        return;
+      }
+      const normalized = normalizeTripForClient(t, pickupForGeo, dropoffForGeo);
+      clearBusyInFinally = false;
+      if (__DEV__) console.warn("[tnc rider] requestRide: POST ok, scheduling setTrip (after interactions + rAF)");
+      /** Unmounting Gorhom BottomSheet in the same tick as the Book CTA often crashes native (gesture handler). */
+      InteractionManager.runAfterInteractions(() => {
+        if (__DEV__) console.warn("[tnc rider] requestRide: InteractionManager callback");
+        requestAnimationFrame(() => {
+          if (__DEV__) console.warn("[tnc rider] requestRide: calling setTrip now");
+          setTrip(normalized);
+          setDriverLive(null);
+          setBusy(false);
+          if (__DEV__) console.warn("[tnc rider] requestRide: setTrip dispatched");
+        });
+      });
     } catch (e) {
-      Alert.alert("Request failed", String(e));
+      Alert.alert("Request failed", e?.message ? String(e.message) : String(e));
     } finally {
-      setBusy(false);
+      if (clearBusyInFinally) setBusy(false);
     }
   };
 
@@ -1218,6 +1261,16 @@ export default function App() {
     if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
     return { latitude: lat, longitude: lng };
   }, [trip?.dropoff?.lat, trip?.dropoff?.lng, dropoff?.lat, dropoff?.lng]);
+
+  const pickupMarkerCoord = useMemo(() => {
+    const p = displayPickup;
+    if (!p) return null;
+    const lat = Number(p.lat);
+    const lng = Number(p.lng);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+    return { latitude: lat, longitude: lng };
+  }, [displayPickup?.lat, displayPickup?.lng]);
+  const tripRequested = trip?.status === "requested";
   /** Dropoff chosen (map button or address pick) — book-ride phase with Request ride. */
   const planningDropoffConfirmed = !trip && bookingStep === "dropoff" && dropoffBookingCommitted;
   /** Pan/zoom/rotate only during pickup / select-dropoff; book-ride is view-only. */
@@ -1246,11 +1299,17 @@ export default function App() {
     !planningDropoffConfirmed &&
     clampPlanningSnapIndex(planningSheetIndex) === PLANNING_SNAP_MAX_INDEX;
 
-  const planningNativeSnapPoints = useMemo(
-    () => (planningDropoffConfirmed ? [PLANNING_BOOK_RIDE_SNAP] : PLANNING_SNAP_POINTS),
-    [planningDropoffConfirmed]
-  );
-  planningSnapPointsRef.current = planningNativeSnapPoints;
+  /** Always length 3 — gorhom is unstable when snap count changes; trip mode reuses the same BottomSheet instance. */
+  const nativePlanningSheetSnapPoints = useMemo(() => {
+    if (trip) {
+      return [TRIP_NATIVE_SHEET_SNAP, TRIP_NATIVE_SHEET_SNAP, TRIP_NATIVE_SHEET_SNAP];
+    }
+    if (planningDropoffConfirmed) {
+      return [PLANNING_BOOK_RIDE_SNAP, PLANNING_BOOK_RIDE_SNAP, PLANNING_BOOK_RIDE_SNAP];
+    }
+    return PLANNING_SNAP_POINTS;
+  }, [trip, planningDropoffConfirmed]);
+  planningSnapPointsRef.current = nativePlanningSheetSnapPoints;
 
   const planningDropoffHasBothCoords =
     !trip &&
@@ -1601,8 +1660,12 @@ export default function App() {
 
 
   const region = useMemo(() => {
-    const p = displayPickup || MAP_FALLBACK_CENTER;
-    const d = displayDropoff;
+    const finitePt = (pt) =>
+      pt && Number.isFinite(Number(pt.lat)) && Number.isFinite(Number(pt.lng));
+    const p = finitePt(displayPickup) ? displayPickup : MAP_FALLBACK_CENTER;
+    const d = finitePt(displayDropoff) ? displayDropoff : null;
+    const driverOK = finitePt(driverCoord) ? driverCoord : null;
+
     const planningPickupOnly = !trip && bookingStep === "pickup";
     if (planningPickupOnly) {
       return {
@@ -1616,20 +1679,20 @@ export default function App() {
     const spanAB = (a, b) =>
       Math.max(Math.abs(a.lat - b.lat), Math.abs(a.lng - b.lng), 0.02) * 1.4;
 
-    if (trip && driverCoord && trip.status === "accepted") {
+    if (trip && driverOK && trip.status === "accepted") {
       return {
-        latitude: (p.lat + driverCoord.lat) / 2,
-        longitude: (p.lng + driverCoord.lng) / 2,
-        latitudeDelta: spanAB(p, driverCoord),
-        longitudeDelta: spanAB(p, driverCoord),
+        latitude: (p.lat + driverOK.lat) / 2,
+        longitude: (p.lng + driverOK.lng) / 2,
+        latitudeDelta: spanAB(p, driverOK),
+        longitudeDelta: spanAB(p, driverOK),
       };
     }
-    if (trip && driverCoord && trip.status === "in_progress" && d) {
+    if (trip && driverOK && trip.status === "in_progress" && d) {
       return {
-        latitude: (d.lat + driverCoord.lat) / 2,
-        longitude: (d.lng + driverCoord.lng) / 2,
-        latitudeDelta: spanAB(d, driverCoord),
-        longitudeDelta: spanAB(d, driverCoord),
+        latitude: (d.lat + driverOK.lat) / 2,
+        longitude: (d.lng + driverOK.lng) / 2,
+        latitudeDelta: spanAB(d, driverOK),
+        longitudeDelta: spanAB(d, driverOK),
       };
     }
 
@@ -1943,21 +2006,29 @@ export default function App() {
                 </View>
               </Marker>
             ) : null}
-            {displayPickup && (!trip || trip.status !== "in_progress") && (trip || bookingStep === "dropoff") ? (
-              <PickupBeaconMarker
-                coordinate={{ latitude: displayPickup.lat, longitude: displayPickup.lng }}
-                title="Pickup"
-                zIndex={2}
-              />
+            {pickupMarkerCoord && (!trip || trip.status !== "in_progress") && (trip || bookingStep === "dropoff") ? (
+              tripRequested ? (
+                <Marker coordinate={pickupMarkerCoord} title="Pickup" pinColor="#16a34a" />
+              ) : (
+                <PickupBeaconMarker
+                  coordinate={pickupMarkerCoord}
+                  title="Pickup"
+                  zIndex={2}
+                />
+              )
             ) : null}
             {dropoffMarkerCoord && (trip || planningDropoffConfirmed) ? (
-              <DropoffBeaconMarker
-                key={`dropoff-${dropoffMarkerCoord.latitude.toFixed(5)}-${dropoffMarkerCoord.longitude.toFixed(5)}`}
-                coordinate={dropoffMarkerCoord}
-                title="Dropoff"
-                zIndex={20}
-                tracksViewChanges
-              />
+              tripRequested ? (
+                <Marker coordinate={dropoffMarkerCoord} title="Dropoff" pinColor="#7c3aed" />
+              ) : (
+                <DropoffBeaconMarker
+                  key={`dropoff-${dropoffMarkerCoord.latitude.toFixed(5)}-${dropoffMarkerCoord.longitude.toFixed(5)}`}
+                  coordinate={dropoffMarkerCoord}
+                  title="Dropoff"
+                  zIndex={20}
+                  tracksViewChanges={false}
+                />
+              )
             ) : null}
             {driverCoord && trip && trip.status !== "requested" ? (
               <Marker
@@ -1979,17 +2050,7 @@ export default function App() {
         {trip?.status === "requested" ? (
           <View style={styles.waitingLayer} pointerEvents="box-none">
             <View style={styles.waitingCard} pointerEvents="auto">
-              {Platform.OS === "web" ? (
-                <ActivityIndicator size="large" color="#2563eb" style={styles.waitingSpinner} />
-              ) : (
-                <LottieView
-                  source={require("./assets/lottie/waiting.json")}
-                  autoPlay
-                  loop
-                  resizeMode="contain"
-                  style={styles.waitingLottie}
-                />
-              )}
+              <ActivityIndicator size="large" color="#2563eb" style={styles.waitingSpinner} />
               <Text style={styles.waitingTitle}>Finding a driver</Text>
               <Text style={styles.waitingSubtitle}>Hang tight — nearby drivers can accept your ride any moment.</Text>
             </View>
@@ -2010,14 +2071,17 @@ export default function App() {
       </View>
 
       {USE_NATIVE_PLANNING_BOTTOM_SHEET ? (
-        !trip ? (
           <BottomSheet
             ref={planningSheetRef}
-            index={clampPlanningIndexToSnapPoints(planningSheetIndex, planningNativeSnapPoints.length)}
-            snapPoints={planningNativeSnapPoints}
-            onChange={onPlanningSheetChange}
+            index={trip ? 0 : clampPlanningIndexToSnapPoints(planningSheetIndex, nativePlanningSheetSnapPoints.length)}
+            snapPoints={nativePlanningSheetSnapPoints}
+            onChange={(idx) => {
+              if (trip) return;
+              onPlanningSheetChange(idx);
+            }}
             enablePanDownToClose={false}
             enableDynamicSizing={false}
+            enableHandlePanningGesture={!trip && !planningDropoffConfirmed}
             keyboardBehavior="interactive"
             keyboardBlurBehavior="restore"
             android_keyboardInputMode="adjustResize"
@@ -2025,6 +2089,103 @@ export default function App() {
             handleIndicatorStyle={styles.planningBottomSheetHandle}
           >
             <View style={styles.planningSheetFill}>
+              {trip ? (
+                <BottomSheetScrollView
+                  style={styles.nativeTripInSheetScroll}
+                  contentContainerStyle={styles.bottomPanelContent}
+                  keyboardShouldPersistTaps="always"
+                  showsVerticalScrollIndicator
+                  bounces={false}
+                  alwaysBounceVertical={false}
+                  {...(Platform.OS === "android" ? { overScrollMode: "never" } : {})}
+                >
+                  <>
+                    <Text style={styles.banner}>
+                      {trip.status === "requested"
+                        ? "Your request is live. You can still cancel below before a driver accepts."
+                        : trip.status === "accepted" || trip.status === "in_progress"
+                          ? `Driver accepted — green P = pickup, purple D = dropoff, car = driver.${
+                              trip?.etaToPickup
+                                ? `\nDriver ETA to pickup: ${trip.etaToPickup.durationText || `~${trip.etaToPickup.summaryMinutes} min`}${trip.etaToPickup.distanceText ? ` · ${trip.etaToPickup.distanceText}` : ""}${trip.etaToPickup.usesTraffic ? " (traffic)" : ""}`
+                                : driverCoord
+                                  ? "\nDriver ETA to pickup: updating…"
+                                  : "\nWaiting for driver location…"
+                            }`
+                          : `Trip: ${trip.status}`}
+                    </Text>
+                    {(trip.status === "accepted" || trip.status === "in_progress") && trip.driverProfile ? (
+                      <View style={styles.driverCard}>
+                        {typeof trip.driverProfile.avatarUrl === "string" &&
+                        (trip.driverProfile.avatarUrl.startsWith("http") ||
+                          trip.driverProfile.avatarUrl.startsWith("data:")) ? (
+                          <Image source={{ uri: trip.driverProfile.avatarUrl }} style={styles.driverAvatarImg} />
+                        ) : (
+                          <View style={[styles.driverAvatarImg, styles.driverAvatarPlaceholder]} />
+                        )}
+                        <View style={styles.driverCardBody}>
+                          <Text style={styles.driverCardName}>
+                            {trip.driverProfile.firstName}
+                            {trip.driverProfile.lastInitial ? ` ${trip.driverProfile.lastInitial}` : ""}
+                          </Text>
+                          {trip.driverProfile.vehicle &&
+                          (trip.driverProfile.vehicle.make ||
+                            trip.driverProfile.vehicle.model ||
+                            trip.driverProfile.vehicle.color) ? (
+                            <Text style={styles.driverCardMeta} numberOfLines={2}>
+                              {[trip.driverProfile.vehicle.color, trip.driverProfile.vehicle.make, trip.driverProfile.vehicle.model]
+                                .filter(Boolean)
+                                .join(" · ")}
+                            </Text>
+                          ) : null}
+                          {trip.driverProfile.vehicle?.licensePlate ? (
+                            <Text style={styles.driverCardMeta}>{trip.driverProfile.vehicle.licensePlate}</Text>
+                          ) : null}
+                        </View>
+                        {typeof trip.driverProfile.vehicle?.photoUrl === "string" &&
+                        (trip.driverProfile.vehicle.photoUrl.startsWith("http") ||
+                          trip.driverProfile.vehicle.photoUrl.startsWith("data:")) ? (
+                          <Image source={{ uri: trip.driverProfile.vehicle.photoUrl }} style={styles.vehicleThumb} />
+                        ) : null}
+                      </View>
+                    ) : null}
+                    <View style={styles.addrSection}>
+                      <Text style={styles.addrText}>Pickup: {trip?.pickupAddress || "Not available"}</Text>
+                      <Text style={styles.addrText}>Dropoff: {trip?.dropoffAddress || "Not set"}</Text>
+                      {trip?.fareEstimate?.total != null ? (
+                        trip.fareEstimate.breakdown?.fareFree ? (
+                          <View>
+                            <Text style={styles.farePreviewText}>
+                              Fare (at request): waived · $
+                              {Number(trip.fareEstimate.total).toFixed(2)}
+                            </Text>
+                            {typeof trip.fareEstimate.breakdown?.waivedQuoteUsd === "number" ? (
+                              <Text style={styles.farePreviewMuted}>
+                                Would have been ${Number(trip.fareEstimate.breakdown.waivedQuoteUsd).toFixed(2)}
+                              </Text>
+                            ) : null}
+                            <Pressable style={styles.farePreviewWhy} onPress={() => setFreeRideWhyOpen(true)}>
+                              <Text style={styles.farePreviewWhyText}>Why is this free?</Text>
+                            </Pressable>
+                          </View>
+                        ) : (
+                          <Text style={styles.farePreviewText}>
+                            Fare (at request): {trip.fareEstimate.currency === "USD" ? "$" : ""}
+                            {Number(trip.fareEstimate.total).toFixed(2)}
+                          </Text>
+                        )
+                      ) : null}
+                    </View>
+                  </>
+                  <View style={styles.row}>
+                    {trip && trip.status !== "completed" && trip.status !== "cancelled" ? (
+                      <Pressable style={[styles.smallBtn, styles.warnBtn]} onPress={clearRide} disabled={busy}>
+                        <Text style={styles.warnBtnText}>Clear ride</Text>
+                      </Pressable>
+                    ) : null}
+                  </View>
+                </BottomSheetScrollView>
+              ) : (
+                <>
               {showPlanningSheetHeader ? (
                 <View style={[styles.planSheetHeaderRow, styles.planningSheetHeaderInset]}>
                   <Text style={styles.selectLocationTitle} numberOfLines={1}>
@@ -2216,102 +2377,10 @@ export default function App() {
                   )}
                 </BottomSheetScrollView>
               )}
+                </>
+              )}
             </View>
           </BottomSheet>
-        ) : (
-          <View style={styles.tripBottomDock} pointerEvents="box-none">
-            <ScrollView
-              style={styles.tripBottomDockScroll}
-              contentContainerStyle={styles.bottomPanelContent}
-              keyboardShouldPersistTaps="always"
-            >
-              <>
-                <Text style={styles.banner}>
-                  {trip.status === "requested"
-                    ? "Your request is live. You can still cancel below if plans change."
-                    : trip.status === "accepted" || trip.status === "in_progress"
-                      ? `Driver accepted — green P = pickup, purple D = dropoff, car = driver.${
-                          trip?.etaToPickup
-                            ? `\nDriver ETA to pickup: ${trip.etaToPickup.durationText || `~${trip.etaToPickup.summaryMinutes} min`}${trip.etaToPickup.distanceText ? ` · ${trip.etaToPickup.distanceText}` : ""}${trip.etaToPickup.usesTraffic ? " (traffic)" : ""}`
-                            : driverCoord
-                              ? "\nDriver ETA to pickup: updating…"
-                              : "\nWaiting for driver location…"
-                        }`
-                      : `Trip: ${trip.status}`}
-                </Text>
-                {(trip.status === "accepted" || trip.status === "in_progress") && trip.driverProfile ? (
-                  <View style={styles.driverCard}>
-                    {typeof trip.driverProfile.avatarUrl === "string" &&
-                    (trip.driverProfile.avatarUrl.startsWith("http") ||
-                      trip.driverProfile.avatarUrl.startsWith("data:")) ? (
-                      <Image source={{ uri: trip.driverProfile.avatarUrl }} style={styles.driverAvatarImg} />
-                    ) : (
-                      <View style={[styles.driverAvatarImg, styles.driverAvatarPlaceholder]} />
-                    )}
-                    <View style={styles.driverCardBody}>
-                      <Text style={styles.driverCardName}>
-                        {trip.driverProfile.firstName}
-                        {trip.driverProfile.lastInitial ? ` ${trip.driverProfile.lastInitial}` : ""}
-                      </Text>
-                      {trip.driverProfile.vehicle &&
-                      (trip.driverProfile.vehicle.make ||
-                        trip.driverProfile.vehicle.model ||
-                        trip.driverProfile.vehicle.color) ? (
-                        <Text style={styles.driverCardMeta} numberOfLines={2}>
-                          {[trip.driverProfile.vehicle.color, trip.driverProfile.vehicle.make, trip.driverProfile.vehicle.model]
-                            .filter(Boolean)
-                            .join(" · ")}
-                        </Text>
-                      ) : null}
-                      {trip.driverProfile.vehicle?.licensePlate ? (
-                        <Text style={styles.driverCardMeta}>{trip.driverProfile.vehicle.licensePlate}</Text>
-                      ) : null}
-                    </View>
-                    {typeof trip.driverProfile.vehicle?.photoUrl === "string" &&
-                    (trip.driverProfile.vehicle.photoUrl.startsWith("http") ||
-                      trip.driverProfile.vehicle.photoUrl.startsWith("data:")) ? (
-                      <Image source={{ uri: trip.driverProfile.vehicle.photoUrl }} style={styles.vehicleThumb} />
-                    ) : null}
-                  </View>
-                ) : null}
-                <View style={styles.addrSection}>
-                  <Text style={styles.addrText}>Pickup: {trip?.pickupAddress || "Not available"}</Text>
-                  <Text style={styles.addrText}>Dropoff: {trip?.dropoffAddress || "Not set"}</Text>
-                  {trip?.fareEstimate?.total != null ? (
-                    trip.fareEstimate.breakdown?.fareFree ? (
-                      <View>
-                        <Text style={styles.farePreviewText}>
-                          Fare (at request): waived · $
-                          {Number(trip.fareEstimate.total).toFixed(2)}
-                        </Text>
-                        {typeof trip.fareEstimate.breakdown?.waivedQuoteUsd === "number" ? (
-                          <Text style={styles.farePreviewMuted}>
-                            Would have been ${Number(trip.fareEstimate.breakdown.waivedQuoteUsd).toFixed(2)}
-                          </Text>
-                        ) : null}
-                        <Pressable style={styles.farePreviewWhy} onPress={() => setFreeRideWhyOpen(true)}>
-                          <Text style={styles.farePreviewWhyText}>Why is this free?</Text>
-                        </Pressable>
-                      </View>
-                    ) : (
-                      <Text style={styles.farePreviewText}>
-                        Fare (at request): {trip.fareEstimate.currency === "USD" ? "$" : ""}
-                        {Number(trip.fareEstimate.total).toFixed(2)}
-                      </Text>
-                    )
-                  ) : null}
-                </View>
-              </>
-              <View style={styles.row}>
-                {trip && trip.status !== "completed" && trip.status !== "cancelled" ? (
-                  <Pressable style={[styles.smallBtn, styles.warnBtn]} onPress={clearRide} disabled={busy}>
-                    <Text style={styles.warnBtnText}>Clear ride</Text>
-                  </Pressable>
-                ) : null}
-              </View>
-            </ScrollView>
-          </View>
-        )
       ) : (
         <View
           style={[
@@ -2681,6 +2750,8 @@ const styles = StyleSheet.create({
     borderColor: "#e2e8f0",
   },
   bookRideTravelTimeText: { flex: 1, fontSize: 15, ...pj.m, color: "#334155" },
+  /** Trip summary inside persistent BottomSheet — flex only; sheet snap height already caps layout. */
+  nativeTripInSheetScroll: { flex: 1 },
   tripBottomDock: {
     position: "absolute",
     left: 0,
@@ -3312,17 +3383,21 @@ function BookRideFooter({ styles, farePreview, busy, onRequestRide, onPressWhyFr
     priceLine = "…";
   } else if (farePreview?.kind === "ok") {
     const e = farePreview.estimate;
-    const cur = e.currency === "USD" ? "$" : "";
-    if (e.breakdown?.fareFree) {
-      priceLine = `${cur}0.00`;
-      if (typeof e.breakdown?.waivedQuoteUsd === "number") {
-        priceWas = `Was ${cur}${Number(e.breakdown.waivedQuoteUsd).toFixed(2)}`;
+    if (e && typeof e === "object") {
+      const cur = e.currency === "USD" ? "$" : "";
+      if (e.breakdown?.fareFree) {
+        priceLine = `${cur}0.00`;
+        if (typeof e.breakdown?.waivedQuoteUsd === "number") {
+          priceWas = `Was ${cur}${Number(e.breakdown.waivedQuoteUsd).toFixed(2)}`;
+        }
+        showWhyFree = true;
+      } else {
+        const t = e.total;
+        priceLine =
+          typeof t === "number" && Number.isFinite(t) ? `${cur}${t.toFixed(2)}` : "—";
       }
-      showWhyFree = true;
     } else {
-      const t = e.total;
-      priceLine =
-        typeof t === "number" && Number.isFinite(t) ? `${cur}${t.toFixed(2)}` : "—";
+      priceLine = "—";
     }
   } else if (farePreview?.kind === "err") {
     priceLine = "—";
@@ -3336,7 +3411,7 @@ function BookRideFooter({ styles, farePreview, busy, onRequestRide, onPressWhyFr
     <View style={styles.bookRideFooter}>
       <View style={styles.bookRideOptionCard}>
         <View style={styles.bookRideOptionIconWrap}>
-          <Ionicons name="car-sport-outline" size={26} color="#0f172a" />
+          <Ionicons name="car-outline" size={26} color="#0f172a" />
         </View>
         <View style={styles.bookRideOptionTextBlock}>
           <Text style={styles.bookRideOptionProductTitle}>TNC Ride</Text>

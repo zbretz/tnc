@@ -1,6 +1,12 @@
 const path = require("path");
 require("dotenv").config({ path: path.resolve(__dirname, "../../.env") });
 
+/** Non-empty only — Expo `withMaps` skips `react-native-google-maps` when this is missing/falsy (empty string counts as “no Google Maps”). */
+const googleMapsApiKey =
+  typeof process.env.GOOGLE_MAPS_API_KEY === "string" && process.env.GOOGLE_MAPS_API_KEY.trim().length > 0
+    ? process.env.GOOGLE_MAPS_API_KEY.trim()
+    : undefined;
+
 /** @type {import('expo/config').ExpoConfig} */
 module.exports = {
   name: "TNC Rider",
@@ -26,9 +32,7 @@ module.exports = {
         NSAllowsLocalNetworking: true,
       },
     },
-    config: {
-      googleMapsApiKey: process.env.GOOGLE_MAPS_API_KEY || "",
-    },
+    ...(googleMapsApiKey ? { config: { googleMapsApiKey } } : {}),
   },
   android: {
     package: "com.tnc.rider",
@@ -42,11 +46,7 @@ module.exports = {
       monochromeImage: "./assets/android-icon-monochrome.png",
     },
     permissions: ["ACCESS_COARSE_LOCATION", "ACCESS_FINE_LOCATION"],
-    config: {
-      googleMaps: {
-        apiKey: process.env.GOOGLE_MAPS_API_KEY || "",
-      },
-    },
+    ...(googleMapsApiKey ? { config: { googleMaps: { apiKey: googleMapsApiKey } } } : {}),
   },
   web: {
     favicon: "./assets/favicon.png",

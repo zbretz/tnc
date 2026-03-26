@@ -2,7 +2,7 @@ import { StyleSheet, Text, View } from "react-native";
 import { Marker } from "react-native-maps";
 
 const PICKUP = "#16a34a";
-const DROPOFF = "#7c3aed";
+const DROPOFF = "#c9a010";
 
 const pickupS = StyleSheet.create({
   wrap: { alignItems: "center" },
