@@ -5,7 +5,12 @@ import mongoose from "mongoose";
 import { User } from "../models/User.js";
 import { DriverProfile } from "../models/DriverProfile.js";
 import { OtpChallenge } from "../models/OtpChallenge.js";
-import { authMiddleware, signToken } from "../middleware/auth.js";
+import {
+  authMiddleware,
+  signRiderSignupToken,
+  signToken,
+  verifyRiderSignupToken,
+} from "../middleware/auth.js";
 import { serializeUserMe } from "../serialize.js";
 import { normalizePhoneE164 } from "../lib/phone.js";
 
@@ -103,7 +108,8 @@ function splitNameForDriver(name, firstNameIn, lastNameIn) {
 
 /**
  * POST /auth/otp/start { phone }
- * POST /auth/otp/verify { phone, code }
+ * POST /auth/otp/verify { phone, code } → { token, user } or { needsProfile, signupToken }
+ * POST /auth/otp/complete-profile { signupToken, firstName, lastName }
  */
 r.post("/otp/start", async (req, res) => {
   const phoneE164 = normalizePhoneE164(req.body?.phone);
@@ -166,29 +172,62 @@ r.post("/otp/verify", async (req, res) => {
   challenge.consumedAt = new Date();
   await challenge.save();
 
+  let user = await User.findOne({ phoneE164 }).exec();
+  if (!user) {
+    const signupToken = signRiderSignupToken(phoneE164);
+    res.json({ needsProfile: true, signupToken });
+    return;
+  }
+  user.phoneVerifiedAt = new Date();
+  if (!user.phone) user.phone = phoneE164;
+  await user.save();
+  const token = signToken(String(user._id), user);
+  const fresh = await User.findById(user._id).select("-passwordHash").exec();
+  res.json({ token, user: serializeUserMe(fresh) });
+});
+
+/**
+ * POST /auth/otp/complete-profile { signupToken, firstName, lastName }
+ * Finishes rider signup after POST /auth/otp/verify returned needsProfile.
+ */
+r.post("/otp/complete-profile", async (req, res) => {
+  const raw = req.body?.signupToken;
+  if (typeof raw !== "string" || !raw.trim()) {
+    res.status(400).json({ error: "signupToken required" });
+    return;
+  }
+  let phoneE164;
+  try {
+    ({ phoneE164 } = verifyRiderSignupToken(raw.trim()));
+  } catch {
+    res.status(401).json({ error: "Invalid or expired signup token" });
+    return;
+  }
   const firstNameIn =
     typeof req.body?.firstName === "string" ? req.body.firstName.trim().slice(0, 80) : "";
   const lastNameIn = typeof req.body?.lastName === "string" ? req.body.lastName.trim().slice(0, 80) : "";
-
-  let user = await User.findOne({ phoneE164 }).exec();
-  if (!user) {
-    const displayName =
-      [firstNameIn, lastNameIn].filter(Boolean).join(" ").trim() || "Rider";
-    user = await User.create({
-      phoneE164,
-      firstName: firstNameIn,
-      lastName: lastNameIn,
-      name: displayName,
-      role: "rider",
-      roles: ["rider"],
-      phoneVerifiedAt: new Date(),
-      phone: phoneE164,
-    });
-  } else {
-    user.phoneVerifiedAt = new Date();
-    if (!user.phone) user.phone = phoneE164;
-    await user.save();
+  if (!firstNameIn || !lastNameIn) {
+    res.status(400).json({ error: "first and last name required" });
+    return;
   }
+  let user = await User.findOne({ phoneE164 }).exec();
+  if (user) {
+    const token = signToken(String(user._id), user);
+    const fresh = await User.findById(user._id).select("-passwordHash").exec();
+    res.json({ token, user: serializeUserMe(fresh) });
+    return;
+  }
+  const displayName = [firstNameIn, lastNameIn].filter(Boolean).join(" ").trim();
+  user = await User.create({
+    phoneE164,
+    firstName: firstNameIn,
+    lastName: lastNameIn,
+    name: displayName,
+    role: "rider",
+    roles: ["rider"],
+    phoneVerifiedAt: new Date(),
+    phone: phoneE164,
+  });
   const token = signToken(String(user._id), user);
   const fresh = await User.findById(user._id).select("-passwordHash").exec();
   res.json({ token, user: serializeUserMe(fresh) });

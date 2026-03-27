@@ -8,6 +8,7 @@ import {
   InteractionManager,
   Keyboard,
   KeyboardAvoidingView,
+  Linking,
   Modal,
   Platform,
   Pressable,
@@ -532,52 +533,42 @@ export default function App() {
   const [token, setToken] = useState(null);
   const [loginPhone, setLoginPhone] = useState("");
   const [loginOtp, setLoginOtp] = useState("");
-  /** After a successful POST /auth/otp/start — then show code field + Sign in. */
+  /** After a successful POST /auth/otp/start — then show code step (or name step if new user). */
   const [loginOtpSent, setLoginOtpSent] = useState(false);
-  /** false = sign in (phone only); true = create account (first, last, phone). */
-  const [authIsSignUp, setAuthIsSignUp] = useState(false);
+  /** After OTP verify: new number → collect name before POST /auth/otp/complete-profile. */
+  const [loginAwaitingProfile, setLoginAwaitingProfile] = useState(false);
+  const [pendingSignupToken, setPendingSignupToken] = useState(null);
   const [signupFirstName, setSignupFirstName] = useState("");
   const [signupLastName, setSignupLastName] = useState("");
   const [busy, setBusy] = useState(false);
+  /** UI-only: shown once after new-user name step so you can preview the local-status flow. */
+  const [showLocalStatusPreview, setShowLocalStatusPreview] = useState(false);
 
   useEffect(() => {
     setLoginOtpSent(false);
     setLoginOtp("");
+    setLoginAwaitingProfile(false);
+    setPendingSignupToken(null);
+    setSignupFirstName("");
+    setSignupLastName("");
   }, [loginPhone]);
-
-  useEffect(() => {
-    setLoginOtpSent(false);
-    setLoginOtp("");
-  }, [authIsSignUp]);
-
-  const wasAuthSignUpRef = useRef(false);
-  useEffect(() => {
-    if (wasAuthSignUpRef.current && !authIsSignUp) {
-      setSignupFirstName("");
-      setSignupLastName("");
-    }
-    wasAuthSignUpRef.current = authIsSignUp;
-  }, [authIsSignUp]);
 
   const loginOtpInputRef = useRef(null);
   const goBackToPhoneLogin = useCallback(() => {
     Keyboard.dismiss();
     setLoginOtpSent(false);
     setLoginOtp("");
-  }, []);
-
-  const toggleAuthSignUpMode = useCallback(() => {
-    Keyboard.dismiss();
-    setAuthIsSignUp((prev) => !prev);
-    setLoginOtpSent(false);
-    setLoginOtp("");
+    setLoginAwaitingProfile(false);
+    setPendingSignupToken(null);
+    setSignupFirstName("");
+    setSignupLastName("");
   }, []);
 
   useEffect(() => {
-    if (!loginOtpSent) return undefined;
+    if (!loginOtpSent || loginAwaitingProfile) return undefined;
     const t = setTimeout(() => loginOtpInputRef.current?.focus?.(), 400);
     return () => clearTimeout(t);
-  }, [loginOtpSent]);
+  }, [loginOtpSent, loginAwaitingProfile]);
 
   const [pickup, setPickup] = useState(null);
   /** Optional destination; sent with POST /trips when set. */
@@ -1003,14 +994,6 @@ export default function App() {
       Alert.alert("Phone required", "Enter your mobile number.");
       return;
     }
-    if (authIsSignUp) {
-      const fn = signupFirstName.trim();
-      const ln = signupLastName.trim();
-      if (!fn || !ln) {
-        Alert.alert("Name required", "Enter your first and last name.");
-        return;
-      }
-    }
     const isResend = loginOtpSent;
     setBusy(true);
     try {
@@ -1034,36 +1017,86 @@ export default function App() {
     const phone = loginPhone.trim();
     const code = loginOtp.trim();
     if (!phone || !/^\d{4}$/.test(code)) {
-      Alert.alert(
-        authIsSignUp ? "Create account" : "Sign in",
-        "Enter the 4-digit code we sent to your phone.",
-      );
+      Alert.alert("Verification", "Enter the 4-digit code we sent to your phone.");
       return;
     }
     setBusy(true);
     try {
-      const body = { phone, code };
-      if (authIsSignUp) {
-        body.firstName = signupFirstName.trim();
-        body.lastName = signupLastName.trim();
-      }
-      const { token: t } = await api("/auth/otp/verify", {
+      const data = await api("/auth/otp/verify", {
         method: "POST",
-        body,
+        body: { phone, code },
       });
+      if (data.needsProfile === true && typeof data.signupToken === "string" && data.signupToken) {
+        loginOtpInputRef.current?.blur?.();
+        Keyboard.dismiss();
+        setPendingSignupToken(data.signupToken);
+        setLoginOtp("");
+        setLoginAwaitingProfile(true);
+        return;
+      }
+      const t = data.token;
+      if (!t) {
+        Alert.alert("Sign in failed", "Unexpected response from server.");
+        return;
+      }
       await AsyncStorage.setItem(TOKEN_KEY, t);
       setToken(t);
       setLoginOtp("");
       setLoginOtpSent(false);
+      setLoginAwaitingProfile(false);
+      setPendingSignupToken(null);
       setSignupFirstName("");
       setSignupLastName("");
-      setAuthIsSignUp(false);
     } catch (e) {
-      Alert.alert(authIsSignUp ? "Could not create account" : "Sign in failed", String(e));
+      Alert.alert("Sign in failed", String(e));
     } finally {
       setBusy(false);
     }
   };
+
+  const completeRiderProfile = async () => {
+    const fn = signupFirstName.trim();
+    const ln = signupLastName.trim();
+    if (!fn || !ln) {
+      Alert.alert("Name required", "Enter your first and last name.");
+      return;
+    }
+    if (!pendingSignupToken) {
+      Alert.alert("Session expired", "Go back and request a new code.");
+      return;
+    }
+    setBusy(true);
+    try {
+      const { token: t } = await api("/auth/otp/complete-profile", {
+        method: "POST",
+        body: {
+          signupToken: pendingSignupToken,
+          firstName: fn,
+          lastName: ln,
+        },
+      });
+      if (!t) {
+        Alert.alert("Could not finish signup", "Unexpected response from server.");
+        return;
+      }
+      await AsyncStorage.setItem(TOKEN_KEY, t);
+      setToken(t);
+      setLoginOtpSent(false);
+      setLoginAwaitingProfile(false);
+      setPendingSignupToken(null);
+      setSignupFirstName("");
+      setSignupLastName("");
+      setShowLocalStatusPreview(true);
+    } catch (e) {
+      Alert.alert("Could not finish signup", String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const dismissLocalStatusPreview = useCallback(() => {
+    setShowLocalStatusPreview(false);
+  }, []);
 
   const markProgrammaticMapMove = useCallback(() => {
     programmaticMapMoveRef.current = true;
@@ -1356,6 +1389,7 @@ export default function App() {
   const logout = async () => {
     await AsyncStorage.removeItem(TOKEN_KEY);
     setRideInterstitialReset(false);
+    setShowLocalStatusPreview(false);
     setToken(null);
     setTrip(null);
     setDriverLive(null);
@@ -2160,32 +2194,9 @@ export default function App() {
             {!loginOtpSent ? (
               <>
                 <Text style={styles.authHint}>
-                  {authIsSignUp
-                    ? "Create an account with your name and phone. We’ll text you a one-time code."
-                    : "Sign in with your phone. We’ll text you a one-time code."}
+                  Enter your mobile number. We’ll text you a one-time code. If you’re new, we’ll ask for your name after
+                  you verify.
                 </Text>
-                {authIsSignUp ? (
-                  <>
-                    <TextInput
-                      style={styles.input}
-                      placeholder="First name"
-                      autoCapitalize="words"
-                      textContentType="givenName"
-                      autoComplete="given-name"
-                      value={signupFirstName}
-                      onChangeText={setSignupFirstName}
-                    />
-                    <TextInput
-                      style={styles.input}
-                      placeholder="Last name"
-                      autoCapitalize="words"
-                      textContentType="familyName"
-                      autoComplete="family-name"
-                      value={signupLastName}
-                      onChangeText={setSignupLastName}
-                    />
-                  </>
-                ) : null}
                 <TextInput
                   style={styles.input}
                   placeholder="Mobile number"
@@ -2198,17 +2209,6 @@ export default function App() {
                 />
                 <Pressable style={styles.secondaryBtn} onPress={sendLoginCode} disabled={busy}>
                   {busy ? <ActivityIndicator color="#1d4ed8" /> : <Text style={styles.secondaryBtnText}>Send code</Text>}
-                </Pressable>
-                <Pressable
-                  style={styles.authModeToggle}
-                  onPress={toggleAuthSignUpMode}
-                  disabled={busy}
-                  accessibilityRole="button"
-                  accessibilityLabel={authIsSignUp ? "Switch to sign in" : "Switch to create account"}
-                >
-                  <Text style={styles.authModeToggleText}>
-                    {authIsSignUp ? "Already have an account? Sign in" : "Need an account? Create one"}
-                  </Text>
                 </Pressable>
               </>
             ) : null}
@@ -2226,9 +2226,10 @@ export default function App() {
             keyboardVerticalOffset={Platform.OS === "ios" ? 8 : 0}
           >
             <ScrollView
-              keyboardShouldPersistTaps="handled"
+              keyboardShouldPersistTaps="always"
               contentContainerStyle={styles.authOtpModalScroll}
               showsVerticalScrollIndicator={false}
+              nestedScrollEnabled
             >
               <Pressable
                 style={styles.authOtpModalBack}
@@ -2240,41 +2241,121 @@ export default function App() {
                 <Ionicons name="chevron-back" size={28} color="#1d4ed8" />
                 <Text style={styles.authOtpModalBackText}>Change number</Text>
               </Pressable>
-              <Text style={styles.authOtpModalTitle}>Enter code</Text>
-              <Text style={styles.authOtpModalSub}>
-                We sent a 4-digit code to {maskPhoneForDisplay(loginPhone)}.
-              </Text>
-              <TextInput
-                ref={loginOtpInputRef}
-                style={[styles.input, styles.authOtpCodeInput]}
-                placeholder="0000"
-                placeholderTextColor="#94a3b8"
-                keyboardType="number-pad"
-                textContentType="oneTimeCode"
-                maxLength={4}
-                value={loginOtp}
-                onChangeText={setLoginOtp}
-                accessibilityLabel="4-digit verification code"
-              />
-              <Pressable style={styles.primaryBtn} onPress={verifyPhoneLogin} disabled={busy}>
-                {busy ? (
-                  <ActivityIndicator color="#fff" />
-                ) : (
-                  <Text style={styles.primaryBtnText}>{authIsSignUp ? "Create account" : "Sign in"}</Text>
-                )}
-              </Pressable>
-              <Pressable
-                style={styles.authOtpResend}
-                onPress={sendLoginCode}
-                disabled={busy}
-                accessibilityRole="button"
-                accessibilityLabel="Resend code"
-              >
-                <Text style={styles.authOtpResendText}>{busy ? "Sending…" : "Resend code"}</Text>
-              </Pressable>
+              {loginAwaitingProfile ? (
+                <View key="auth-step-profile" style={styles.authOtpStepBlock}>
+                  <Text style={styles.authOtpModalTitle}>Almost done</Text>
+                  <Text style={styles.authOtpModalSub}>
+                    We don’t have an account for {maskPhoneForDisplay(loginPhone)} yet. Add your name to finish signing
+                    up.
+                  </Text>
+                  <TextInput
+                    style={[styles.input, styles.authOtpNameInput]}
+                    placeholder="First name"
+                    placeholderTextColor="#94a3b8"
+                    keyboardType="default"
+                    autoCapitalize="words"
+                    textContentType="givenName"
+                    autoComplete="given-name"
+                    value={signupFirstName}
+                    onChangeText={setSignupFirstName}
+                  />
+                  <TextInput
+                    style={[styles.input, styles.authOtpNameInput]}
+                    placeholder="Last name"
+                    placeholderTextColor="#94a3b8"
+                    keyboardType="default"
+                    autoCapitalize="words"
+                    textContentType="familyName"
+                    autoComplete="family-name"
+                    value={signupLastName}
+                    onChangeText={setSignupLastName}
+                  />
+                  <Pressable style={styles.primaryBtn} onPress={completeRiderProfile} disabled={busy}>
+                    {busy ? <ActivityIndicator color="#fff" /> : <Text style={styles.primaryBtnText}>Continue</Text>}
+                  </Pressable>
+                </View>
+              ) : (
+                <View key="auth-step-otp" style={styles.authOtpStepBlock}>
+                  <Text style={styles.authOtpModalTitle}>Enter code</Text>
+                  <Text style={styles.authOtpModalSub}>
+                    We sent a 4-digit code to {maskPhoneForDisplay(loginPhone)}.
+                  </Text>
+                  <TextInput
+                    ref={loginOtpInputRef}
+                    style={[styles.input, styles.authOtpCodeInput]}
+                    placeholder="0000"
+                    placeholderTextColor="#94a3b8"
+                    keyboardType="number-pad"
+                    textContentType="oneTimeCode"
+                    maxLength={4}
+                    value={loginOtp}
+                    onChangeText={setLoginOtp}
+                    accessibilityLabel="4-digit verification code"
+                  />
+                  <Pressable style={styles.primaryBtn} onPress={verifyPhoneLogin} disabled={busy}>
+                    {busy ? <ActivityIndicator color="#fff" /> : <Text style={styles.primaryBtnText}>Continue</Text>}
+                  </Pressable>
+                  <Pressable
+                    style={styles.authOtpResend}
+                    onPress={sendLoginCode}
+                    disabled={busy}
+                    accessibilityRole="button"
+                    accessibilityLabel="Resend code"
+                  >
+                    <Text style={styles.authOtpResendText}>{busy ? "Sending…" : "Resend code"}</Text>
+                  </Pressable>
+                </View>
+              )}
             </ScrollView>
           </KeyboardAvoidingView>
         </Modal>
+      </View>
+    );
+  }
+
+  if (showLocalStatusPreview) {
+    return (
+      <View style={styles.localStatusPreviewRoot}>
+        <StatusBar style="dark" />
+        <ScrollView
+          style={styles.localStatusPreviewScroll}
+          contentContainerStyle={styles.localStatusPreviewContent}
+          keyboardShouldPersistTaps="handled"
+          showsVerticalScrollIndicator={false}
+        >
+          <Text style={styles.localStatusPreviewKicker}>Local status</Text>
+          <Text style={styles.localStatusPreviewTitle}>Opt in and ride your first in-town trip free</Text>
+          <Text style={styles.localStatusPreviewBody}>
+            If you’re a local, we’ll verify it—either with a short quiz or a quick call with Zach. Once you’re verified,
+            your first ride here in town is on us.
+          </Text>
+          <View style={styles.localStatusPreviewMockList}>
+            <View style={styles.localStatusPreviewMockRow}>
+              <Ionicons name="school-outline" size={22} color="#64748b" />
+              <View style={styles.localStatusPreviewMockTextCol}>
+                <Text style={styles.localStatusPreviewMockTitle}>Take the short quiz</Text>
+                <Text style={styles.localStatusPreviewMockHint}>Not wired up yet — preview only</Text>
+              </View>
+            </View>
+            <View style={styles.localStatusPreviewMockRow}>
+              <Ionicons name="call-outline" size={22} color="#64748b" />
+              <View style={styles.localStatusPreviewMockTextCol}>
+                <Text style={styles.localStatusPreviewMockTitle}>Call Zach</Text>
+                <Text style={styles.localStatusPreviewMockHint}>Not wired up yet — preview only</Text>
+              </View>
+            </View>
+            <View style={styles.localStatusPreviewMockRow}>
+              <Ionicons name="checkmark-circle-outline" size={22} color="#64748b" />
+              <View style={styles.localStatusPreviewMockTextCol}>
+                <Text style={styles.localStatusPreviewMockTitle}>Simulate passing the quiz</Text>
+                <Text style={styles.localStatusPreviewMockHint}>Placeholder — no logic yet</Text>
+              </View>
+            </View>
+          </View>
+          <Pressable style={styles.primaryBtn} onPress={dismissLocalStatusPreview}>
+            <Text style={styles.primaryBtnText}>Continue to the app</Text>
+          </Pressable>
+        </ScrollView>
       </View>
     );
   }
@@ -3636,11 +3717,10 @@ const styles = StyleSheet.create({
   title: { fontSize: 24, ...pj.b, marginBottom: 8 },
   apiHint: { fontSize: 11, ...pj.r, color: "#64748b", marginBottom: 12 },
   authHint: { fontSize: 14, ...pj.r, color: "#475569", marginBottom: 4, lineHeight: 20 },
-  authModeToggle: { paddingVertical: 14, alignItems: "center" },
-  authModeToggleText: { fontSize: 15, ...pj.sb, color: "#2563eb" },
   authOtpModalRoot: { flex: 1, backgroundColor: "#f8fafc" },
   authOtpModalScroll: {
     flexGrow: 1,
+    gap: 12,
     paddingHorizontal: 24,
     paddingTop: Platform.OS === "ios" ? 56 : 40,
     paddingBottom: 48,
@@ -3651,14 +3731,50 @@ const styles = StyleSheet.create({
   authOtpModalBackText: { fontSize: 17, ...pj.sb, color: "#1d4ed8" },
   authOtpModalTitle: { fontSize: 22, ...pj.b, color: "#0f172a", marginBottom: 8 },
   authOtpModalSub: { fontSize: 15, ...pj.r, color: "#64748b", marginBottom: 24, lineHeight: 22 },
+  authOtpStepBlock: { width: "100%", gap: 12 },
   authOtpCodeInput: {
     fontSize: 24,
     letterSpacing: 10,
     textAlign: "center",
     ...pj.sb,
   },
+  /** Explicit typography so name fields never inherit OTP code styling (center / wide letter-spacing). */
+  authOtpNameInput: {
+    letterSpacing: 0,
+    textAlign: "left",
+    fontSize: 16,
+    ...pj.r,
+  },
   authOtpResend: { marginTop: 20, padding: 12, alignItems: "center" },
   authOtpResendText: { fontSize: 15, ...pj.sb, color: "#2563eb" },
+  localStatusPreviewRoot: { flex: 1, backgroundColor: "#f8fafc" },
+  localStatusPreviewScroll: { flex: 1 },
+  localStatusPreviewContent: {
+    flexGrow: 1,
+    paddingHorizontal: 24,
+    paddingTop: Platform.OS === "ios" ? 56 : 40,
+    paddingBottom: 40,
+    justifyContent: "center",
+    gap: 20,
+  },
+  localStatusPreviewKicker: { fontSize: 13, ...pj.sb, color: "#2563eb", textTransform: "uppercase", letterSpacing: 0.6 },
+  localStatusPreviewTitle: { fontSize: 26, ...pj.b, color: "#0f172a", lineHeight: 32 },
+  localStatusPreviewBody: { fontSize: 16, ...pj.r, color: "#475569", lineHeight: 24 },
+  localStatusPreviewMockList: { gap: 14, marginVertical: 8 },
+  localStatusPreviewMockRow: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: 14,
+    paddingVertical: 14,
+    paddingHorizontal: 16,
+    backgroundColor: "#fff",
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: "#e2e8f0",
+  },
+  localStatusPreviewMockTextCol: { flex: 1, gap: 4 },
+  localStatusPreviewMockTitle: { fontSize: 16, ...pj.sb, color: "#334155" },
+  localStatusPreviewMockHint: { fontSize: 13, ...pj.r, color: "#94a3b8" },
   input: {
     borderWidth: 1,
     borderColor: "#cbd5e1",

@@ -34,6 +34,21 @@ export function verifyToken(token) {
   return jwt.verify(token, JWT_SECRET);
 }
 
+/** Short-lived token after OTP verify for a phone with no user yet (rider progressive signup). */
+export function signRiderSignupToken(phoneE164) {
+  return jwt.sign({ purpose: "rider_otp_signup", phoneE164 }, JWT_SECRET, { expiresIn: "15m" });
+}
+
+export function verifyRiderSignupToken(token) {
+  const payload = jwt.verify(token, JWT_SECRET);
+  if (payload.purpose !== "rider_otp_signup" || typeof payload.phoneE164 !== "string" || !payload.phoneE164) {
+    const err = new Error("Invalid signup token");
+    err.name = "JsonWebTokenError";
+    throw err;
+  }
+  return { phoneE164: payload.phoneE164 };
+}
+
 export function authMiddleware(req, res, next) {
   const header = req.headers.authorization;
   const token = header?.startsWith("Bearer ") ? header.slice(7) : null;
