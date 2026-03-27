@@ -27,9 +27,9 @@ function hashOtpCode(phoneE164, code) {
   return crypto.createHmac("sha256", otpPepper()).update(`${phoneE164}:${code}`).digest("hex");
 }
 
-function randomSixDigitCode() {
-  const n = crypto.randomInt(0, 1_000_000);
-  return String(n).padStart(6, "0");
+function randomFourDigitCode() {
+  const n = crypto.randomInt(0, 10_000);
+  return String(n).padStart(4, "0");
 }
 
 async function sendOtpSms(phoneE164, code) {
@@ -116,7 +116,7 @@ r.post("/otp/start", async (req, res) => {
     res.status(429).json({ error: "Please wait before requesting another code" });
     return;
   }
-  const code = randomSixDigitCode();
+  const code = randomFourDigitCode();
   const codeHash = hashOtpCode(phoneE164, code);
   const expiresAt = new Date(Date.now() + OTP_TTL_MS);
   await OtpChallenge.create({ phoneE164, codeHash, expiresAt, attempts: 0 });
@@ -131,8 +131,8 @@ r.post("/otp/start", async (req, res) => {
 r.post("/otp/verify", async (req, res) => {
   const phoneE164 = normalizePhoneE164(req.body?.phone);
   const codeRaw = req.body?.code != null ? String(req.body.code).trim() : "";
-  if (!phoneE164 || !/^\d{4,8}$/.test(codeRaw)) {
-    res.status(400).json({ error: "phone and code required" });
+  if (!phoneE164 || !/^\d{4}$/.test(codeRaw)) {
+    res.status(400).json({ error: "phone and 4-digit code required" });
     return;
   }
   const challenge = await OtpChallenge.findOne({ phoneE164 }).sort({ createdAt: -1 }).exec();

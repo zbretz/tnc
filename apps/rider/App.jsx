@@ -7,6 +7,7 @@ import {
   Image,
   InteractionManager,
   Keyboard,
+  KeyboardAvoidingView,
   Modal,
   Platform,
   Pressable,
@@ -281,6 +282,13 @@ function stripUndefined(obj) {
   return Object.fromEntries(Object.entries(obj).filter(([, v]) => v !== undefined));
 }
 
+/** Mask phone for auth UI (last 4 digits visible). */
+function maskPhoneForDisplay(raw) {
+  const d = String(raw ?? "").replace(/\D/g, "");
+  if (d.length <= 4) return d || "your number";
+  return `••••${d.slice(-4)}`;
+}
+
 async function api(path, opts = {}) {
   const { method = "GET", body, token } = opts;
   const base = getApiUrl().replace(/\/$/, "");
@@ -522,9 +530,30 @@ export default function App() {
   }, [fontsLoaded]);
 
   const [token, setToken] = useState(null);
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
+  const [loginPhone, setLoginPhone] = useState("");
+  const [loginOtp, setLoginOtp] = useState("");
+  /** After a successful POST /auth/otp/start — then show code field + Sign in. */
+  const [loginOtpSent, setLoginOtpSent] = useState(false);
   const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    setLoginOtpSent(false);
+    setLoginOtp("");
+  }, [loginPhone]);
+
+  const loginOtpInputRef = useRef(null);
+  const goBackToPhoneLogin = useCallback(() => {
+    Keyboard.dismiss();
+    setLoginOtpSent(false);
+    setLoginOtp("");
+  }, []);
+
+  useEffect(() => {
+    if (!loginOtpSent) return undefined;
+    const t = setTimeout(() => loginOtpInputRef.current?.focus?.(), 400);
+    return () => clearTimeout(t);
+  }, [loginOtpSent]);
+
   const [pickup, setPickup] = useState(null);
   /** Optional destination; sent with POST /trips when set. */
   const [dropoff, setDropoff] = useState(null);
@@ -589,7 +618,6 @@ export default function App() {
     fareFreeRiderExplanation: "",
   });
   const [freeRideWhyOpen, setFreeRideWhyOpen] = useState(false);
-  const [regPhone, setRegPhone] = useState("");
   const [planRouteCoords, setPlanRouteCoords] = useState(null);
   const [tripRouteCoords, setTripRouteCoords] = useState(null);
   /** Frozen once per trip so MapView `initialRegion` does not track live driver (re-renders would fight gestures). */
@@ -944,40 +972,50 @@ export default function App() {
     driverLive?.lng,
   ]);
 
-  const login = async () => {
+  const sendLoginCode = async () => {
+    const phone = loginPhone.trim();
+    if (!phone) {
+      Alert.alert("Phone required", "Enter your mobile number.");
+      return;
+    }
+    const isResend = loginOtpSent;
     setBusy(true);
     try {
-      const { token: t } = await api("/auth/login", {
+      await api("/auth/otp/start", {
         method: "POST",
-        body: { email, password },
+        body: { phone },
       });
-      await AsyncStorage.setItem(TOKEN_KEY, t);
-      setToken(t);
+      setLoginOtpSent(true);
+      setLoginOtp("");
+      if (!isResend) {
+        Alert.alert("Code sent", "Check your text messages for a verification code.");
+      }
     } catch (e) {
-      Alert.alert("Login failed", String(e));
+      Alert.alert("Could not send code", String(e));
     } finally {
       setBusy(false);
     }
   };
 
-  const register = async () => {
+  const verifyPhoneLogin = async () => {
+    const phone = loginPhone.trim();
+    const code = loginOtp.trim();
+    if (!phone || !/^\d{4}$/.test(code)) {
+      Alert.alert("Sign in", "Enter the 4-digit code we sent to your phone.");
+      return;
+    }
     setBusy(true);
     try {
-      const body = {
-        email,
-        password,
-        name: email.split("@")[0] || "Rider",
-        role: "rider",
-        ...(regPhone.trim() ? { phone: regPhone.trim() } : {}),
-      };
-      const { token: t } = await api("/auth/register", {
+      const { token: t } = await api("/auth/otp/verify", {
         method: "POST",
-        body,
+        body: { phone, code },
       });
       await AsyncStorage.setItem(TOKEN_KEY, t);
       setToken(t);
+      setLoginOtp("");
+      setLoginOtpSent(false);
     } catch (e) {
-      Alert.alert("Register failed", String(e));
+      Alert.alert("Sign in failed", String(e));
     } finally {
       setBusy(false);
     }
@@ -2064,34 +2102,81 @@ export default function App() {
             <Text style={styles.publicClosedText}>{riderService.closedMessage || "Please check back soon."}</Text>
           </View>
         ) : null}
-        <TextInput
-          style={styles.input}
-          placeholder="Email"
-          autoCapitalize="none"
-          keyboardType="email-address"
-          value={email}
-          onChangeText={setEmail}
-        />
-        <TextInput
-          style={styles.input}
-          placeholder="Password"
-          secureTextEntry
-          value={password}
-          onChangeText={setPassword}
-        />
-        <TextInput
-          style={styles.input}
-          placeholder="Phone (optional, for driver contact)"
-          keyboardType="phone-pad"
-          value={regPhone}
-          onChangeText={setRegPhone}
-        />
-        <Pressable style={styles.primaryBtn} onPress={login} disabled={busy}>
-          {busy ? <ActivityIndicator color="#fff" /> : <Text style={styles.primaryBtnText}>Log in</Text>}
-        </Pressable>
-        <Pressable style={styles.secondaryBtn} onPress={register} disabled={busy}>
-          <Text style={styles.secondaryBtnText}>Create rider account</Text>
-        </Pressable>
+        {!loginOtpSent ? (
+          <>
+            <Text style={styles.authHint}>Sign in with your phone. We’ll text you a one-time code.</Text>
+            <TextInput
+              style={styles.input}
+              placeholder="Mobile number"
+              autoCapitalize="none"
+              keyboardType="phone-pad"
+              textContentType="telephoneNumber"
+              autoComplete="tel"
+              value={loginPhone}
+              onChangeText={setLoginPhone}
+            />
+            <Pressable style={styles.secondaryBtn} onPress={sendLoginCode} disabled={busy}>
+              {busy ? <ActivityIndicator color="#1d4ed8" /> : <Text style={styles.secondaryBtnText}>Send code</Text>}
+            </Pressable>
+          </>
+        ) : null}
+        <Modal
+          visible={loginOtpSent}
+          animationType="slide"
+          presentationStyle="fullScreen"
+          onRequestClose={goBackToPhoneLogin}
+        >
+          <KeyboardAvoidingView
+            style={styles.authOtpModalRoot}
+            behavior={Platform.OS === "ios" ? "padding" : "height"}
+            keyboardVerticalOffset={Platform.OS === "ios" ? 8 : 0}
+          >
+            <ScrollView
+              keyboardShouldPersistTaps="handled"
+              contentContainerStyle={styles.authOtpModalScroll}
+              showsVerticalScrollIndicator={false}
+            >
+              <Pressable
+                style={styles.authOtpModalBack}
+                onPress={goBackToPhoneLogin}
+                hitSlop={12}
+                accessibilityRole="button"
+                accessibilityLabel="Back to phone number"
+              >
+                <Ionicons name="chevron-back" size={28} color="#1d4ed8" />
+                <Text style={styles.authOtpModalBackText}>Change number</Text>
+              </Pressable>
+              <Text style={styles.authOtpModalTitle}>Enter code</Text>
+              <Text style={styles.authOtpModalSub}>
+                We sent a 4-digit code to {maskPhoneForDisplay(loginPhone)}.
+              </Text>
+              <TextInput
+                ref={loginOtpInputRef}
+                style={[styles.input, styles.authOtpCodeInput]}
+                placeholder="0000"
+                placeholderTextColor="#94a3b8"
+                keyboardType="number-pad"
+                textContentType="oneTimeCode"
+                maxLength={4}
+                value={loginOtp}
+                onChangeText={setLoginOtp}
+                accessibilityLabel="4-digit verification code"
+              />
+              <Pressable style={styles.primaryBtn} onPress={verifyPhoneLogin} disabled={busy}>
+                {busy ? <ActivityIndicator color="#fff" /> : <Text style={styles.primaryBtnText}>Sign in</Text>}
+              </Pressable>
+              <Pressable
+                style={styles.authOtpResend}
+                onPress={sendLoginCode}
+                disabled={busy}
+                accessibilityRole="button"
+                accessibilityLabel="Resend code"
+              >
+                <Text style={styles.authOtpResendText}>{busy ? "Sending…" : "Resend code"}</Text>
+              </Pressable>
+            </ScrollView>
+          </KeyboardAvoidingView>
+        </Modal>
       </View>
     );
   }
@@ -3446,6 +3531,28 @@ const styles = StyleSheet.create({
   },
   title: { fontSize: 24, ...pj.b, marginBottom: 8 },
   apiHint: { fontSize: 11, ...pj.r, color: "#64748b", marginBottom: 12 },
+  authHint: { fontSize: 14, ...pj.r, color: "#475569", marginBottom: 4, lineHeight: 20 },
+  authOtpModalRoot: { flex: 1, backgroundColor: "#f8fafc" },
+  authOtpModalScroll: {
+    flexGrow: 1,
+    paddingHorizontal: 24,
+    paddingTop: Platform.OS === "ios" ? 56 : 40,
+    paddingBottom: 48,
+    justifyContent: "center",
+    minHeight: Math.round(SCREEN_HEIGHT * 0.92),
+  },
+  authOtpModalBack: { flexDirection: "row", alignItems: "center", gap: 4, marginBottom: 28, alignSelf: "flex-start" },
+  authOtpModalBackText: { fontSize: 17, ...pj.sb, color: "#1d4ed8" },
+  authOtpModalTitle: { fontSize: 22, ...pj.b, color: "#0f172a", marginBottom: 8 },
+  authOtpModalSub: { fontSize: 15, ...pj.r, color: "#64748b", marginBottom: 24, lineHeight: 22 },
+  authOtpCodeInput: {
+    fontSize: 24,
+    letterSpacing: 10,
+    textAlign: "center",
+    ...pj.sb,
+  },
+  authOtpResend: { marginTop: 20, padding: 12, alignItems: "center" },
+  authOtpResendText: { fontSize: 15, ...pj.sb, color: "#2563eb" },
   input: {
     borderWidth: 1,
     borderColor: "#cbd5e1",
