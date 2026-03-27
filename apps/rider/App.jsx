@@ -534,6 +534,10 @@ export default function App() {
   const [loginOtp, setLoginOtp] = useState("");
   /** After a successful POST /auth/otp/start — then show code field + Sign in. */
   const [loginOtpSent, setLoginOtpSent] = useState(false);
+  /** false = sign in (phone only); true = create account (first, last, phone). */
+  const [authIsSignUp, setAuthIsSignUp] = useState(false);
+  const [signupFirstName, setSignupFirstName] = useState("");
+  const [signupLastName, setSignupLastName] = useState("");
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
@@ -541,9 +545,30 @@ export default function App() {
     setLoginOtp("");
   }, [loginPhone]);
 
+  useEffect(() => {
+    setLoginOtpSent(false);
+    setLoginOtp("");
+  }, [authIsSignUp]);
+
+  const wasAuthSignUpRef = useRef(false);
+  useEffect(() => {
+    if (wasAuthSignUpRef.current && !authIsSignUp) {
+      setSignupFirstName("");
+      setSignupLastName("");
+    }
+    wasAuthSignUpRef.current = authIsSignUp;
+  }, [authIsSignUp]);
+
   const loginOtpInputRef = useRef(null);
   const goBackToPhoneLogin = useCallback(() => {
     Keyboard.dismiss();
+    setLoginOtpSent(false);
+    setLoginOtp("");
+  }, []);
+
+  const toggleAuthSignUpMode = useCallback(() => {
+    Keyboard.dismiss();
+    setAuthIsSignUp((prev) => !prev);
     setLoginOtpSent(false);
     setLoginOtp("");
   }, []);
@@ -978,6 +1003,14 @@ export default function App() {
       Alert.alert("Phone required", "Enter your mobile number.");
       return;
     }
+    if (authIsSignUp) {
+      const fn = signupFirstName.trim();
+      const ln = signupLastName.trim();
+      if (!fn || !ln) {
+        Alert.alert("Name required", "Enter your first and last name.");
+        return;
+      }
+    }
     const isResend = loginOtpSent;
     setBusy(true);
     try {
@@ -1001,21 +1034,32 @@ export default function App() {
     const phone = loginPhone.trim();
     const code = loginOtp.trim();
     if (!phone || !/^\d{4}$/.test(code)) {
-      Alert.alert("Sign in", "Enter the 4-digit code we sent to your phone.");
+      Alert.alert(
+        authIsSignUp ? "Create account" : "Sign in",
+        "Enter the 4-digit code we sent to your phone.",
+      );
       return;
     }
     setBusy(true);
     try {
+      const body = { phone, code };
+      if (authIsSignUp) {
+        body.firstName = signupFirstName.trim();
+        body.lastName = signupLastName.trim();
+      }
       const { token: t } = await api("/auth/otp/verify", {
         method: "POST",
-        body: { phone, code },
+        body,
       });
       await AsyncStorage.setItem(TOKEN_KEY, t);
       setToken(t);
       setLoginOtp("");
       setLoginOtpSent(false);
+      setSignupFirstName("");
+      setSignupLastName("");
+      setAuthIsSignUp(false);
     } catch (e) {
-      Alert.alert("Sign in failed", String(e));
+      Alert.alert(authIsSignUp ? "Could not create account" : "Sign in failed", String(e));
     } finally {
       setBusy(false);
     }
@@ -2104,7 +2148,33 @@ export default function App() {
         ) : null}
         {!loginOtpSent ? (
           <>
-            <Text style={styles.authHint}>Sign in with your phone. We’ll text you a one-time code.</Text>
+            <Text style={styles.authHint}>
+              {authIsSignUp
+                ? "Create an account with your name and phone. We’ll text you a one-time code."
+                : "Sign in with your phone. We’ll text you a one-time code."}
+            </Text>
+            {authIsSignUp ? (
+              <>
+                <TextInput
+                  style={styles.input}
+                  placeholder="First name"
+                  autoCapitalize="words"
+                  textContentType="givenName"
+                  autoComplete="given-name"
+                  value={signupFirstName}
+                  onChangeText={setSignupFirstName}
+                />
+                <TextInput
+                  style={styles.input}
+                  placeholder="Last name"
+                  autoCapitalize="words"
+                  textContentType="familyName"
+                  autoComplete="family-name"
+                  value={signupLastName}
+                  onChangeText={setSignupLastName}
+                />
+              </>
+            ) : null}
             <TextInput
               style={styles.input}
               placeholder="Mobile number"
@@ -2117,6 +2187,17 @@ export default function App() {
             />
             <Pressable style={styles.secondaryBtn} onPress={sendLoginCode} disabled={busy}>
               {busy ? <ActivityIndicator color="#1d4ed8" /> : <Text style={styles.secondaryBtnText}>Send code</Text>}
+            </Pressable>
+            <Pressable
+              style={styles.authModeToggle}
+              onPress={toggleAuthSignUpMode}
+              disabled={busy}
+              accessibilityRole="button"
+              accessibilityLabel={authIsSignUp ? "Switch to sign in" : "Switch to create account"}
+            >
+              <Text style={styles.authModeToggleText}>
+                {authIsSignUp ? "Already have an account? Sign in" : "Need an account? Create one"}
+              </Text>
             </Pressable>
           </>
         ) : null}
@@ -2163,7 +2244,11 @@ export default function App() {
                 accessibilityLabel="4-digit verification code"
               />
               <Pressable style={styles.primaryBtn} onPress={verifyPhoneLogin} disabled={busy}>
-                {busy ? <ActivityIndicator color="#fff" /> : <Text style={styles.primaryBtnText}>Sign in</Text>}
+                {busy ? (
+                  <ActivityIndicator color="#fff" />
+                ) : (
+                  <Text style={styles.primaryBtnText}>{authIsSignUp ? "Create account" : "Sign in"}</Text>
+                )}
               </Pressable>
               <Pressable
                 style={styles.authOtpResend}
@@ -3532,6 +3617,8 @@ const styles = StyleSheet.create({
   title: { fontSize: 24, ...pj.b, marginBottom: 8 },
   apiHint: { fontSize: 11, ...pj.r, color: "#64748b", marginBottom: 12 },
   authHint: { fontSize: 14, ...pj.r, color: "#475569", marginBottom: 4, lineHeight: 20 },
+  authModeToggle: { paddingVertical: 14, alignItems: "center" },
+  authModeToggleText: { fontSize: 15, ...pj.sb, color: "#2563eb" },
   authOtpModalRoot: { flex: 1, backgroundColor: "#f8fafc" },
   authOtpModalScroll: {
     flexGrow: 1,

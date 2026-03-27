@@ -166,11 +166,19 @@ r.post("/otp/verify", async (req, res) => {
   challenge.consumedAt = new Date();
   await challenge.save();
 
+  const firstNameIn =
+    typeof req.body?.firstName === "string" ? req.body.firstName.trim().slice(0, 80) : "";
+  const lastNameIn = typeof req.body?.lastName === "string" ? req.body.lastName.trim().slice(0, 80) : "";
+
   let user = await User.findOne({ phoneE164 }).exec();
   if (!user) {
+    const displayName =
+      [firstNameIn, lastNameIn].filter(Boolean).join(" ").trim() || "Rider";
     user = await User.create({
       phoneE164,
-      name: "Rider",
+      firstName: firstNameIn,
+      lastName: lastNameIn,
+      name: displayName,
       role: "rider",
       roles: ["rider"],
       phoneVerifiedAt: new Date(),
