@@ -2126,81 +2126,94 @@ export default function App() {
     return (
       <View style={styles.auth}>
         <StatusBar style="dark" />
-        <Text style={styles.title}>TNC Rider</Text>
-        <Text style={styles.apiHint} selectable>
-          API: {getApiUrl()}
-        </Text>
-        {riderService.fareFreeEnabled ? (
-          <View style={styles.freeRideBannerAuthWrap}>
-            <FreeRideBanner onPressWhy={() => setFreeRideWhyOpen(true)} />
-          </View>
-        ) : null}
-        <FreeRideWhyModal
-          visible={freeRideWhyOpen}
-          explanation={riderService.fareFreeRiderExplanation}
-          onClose={() => setFreeRideWhyOpen(false)}
-        />
-        {ridersPaused ? (
-          <View style={styles.publicClosedBanner}>
-            <Text style={styles.publicClosedTitle}>Rides paused</Text>
-            <Text style={styles.publicClosedText}>{riderService.closedMessage || "Please check back soon."}</Text>
-          </View>
-        ) : null}
-        {!loginOtpSent ? (
-          <>
-            <Text style={styles.authHint}>
-              {authIsSignUp
-                ? "Create an account with your name and phone. We’ll text you a one-time code."
-                : "Sign in with your phone. We’ll text you a one-time code."}
+        <KeyboardAvoidingView
+          style={styles.authKeyboard}
+          behavior={Platform.OS === "ios" ? "padding" : "height"}
+          keyboardVerticalOffset={Platform.OS === "ios" ? 8 : 0}
+        >
+          <ScrollView
+            style={styles.authScroll}
+            contentContainerStyle={styles.authScrollContent}
+            keyboardShouldPersistTaps="handled"
+            showsVerticalScrollIndicator={false}
+          >
+            <Text style={styles.title}>TNC Rider</Text>
+            <Text style={styles.apiHint} selectable>
+              API: {getApiUrl()}
             </Text>
-            {authIsSignUp ? (
+            {riderService.fareFreeEnabled ? (
+              <View style={styles.freeRideBannerAuthWrap}>
+                <FreeRideBanner onPressWhy={() => setFreeRideWhyOpen(true)} />
+              </View>
+            ) : null}
+            <FreeRideWhyModal
+              visible={freeRideWhyOpen}
+              explanation={riderService.fareFreeRiderExplanation}
+              onClose={() => setFreeRideWhyOpen(false)}
+            />
+            {ridersPaused ? (
+              <View style={styles.publicClosedBanner}>
+                <Text style={styles.publicClosedTitle}>Rides paused</Text>
+                <Text style={styles.publicClosedText}>{riderService.closedMessage || "Please check back soon."}</Text>
+              </View>
+            ) : null}
+            {!loginOtpSent ? (
               <>
+                <Text style={styles.authHint}>
+                  {authIsSignUp
+                    ? "Create an account with your name and phone. We’ll text you a one-time code."
+                    : "Sign in with your phone. We’ll text you a one-time code."}
+                </Text>
+                {authIsSignUp ? (
+                  <>
+                    <TextInput
+                      style={styles.input}
+                      placeholder="First name"
+                      autoCapitalize="words"
+                      textContentType="givenName"
+                      autoComplete="given-name"
+                      value={signupFirstName}
+                      onChangeText={setSignupFirstName}
+                    />
+                    <TextInput
+                      style={styles.input}
+                      placeholder="Last name"
+                      autoCapitalize="words"
+                      textContentType="familyName"
+                      autoComplete="family-name"
+                      value={signupLastName}
+                      onChangeText={setSignupLastName}
+                    />
+                  </>
+                ) : null}
                 <TextInput
                   style={styles.input}
-                  placeholder="First name"
-                  autoCapitalize="words"
-                  textContentType="givenName"
-                  autoComplete="given-name"
-                  value={signupFirstName}
-                  onChangeText={setSignupFirstName}
+                  placeholder="Mobile number"
+                  autoCapitalize="none"
+                  keyboardType="phone-pad"
+                  textContentType="telephoneNumber"
+                  autoComplete="tel"
+                  value={loginPhone}
+                  onChangeText={setLoginPhone}
                 />
-                <TextInput
-                  style={styles.input}
-                  placeholder="Last name"
-                  autoCapitalize="words"
-                  textContentType="familyName"
-                  autoComplete="family-name"
-                  value={signupLastName}
-                  onChangeText={setSignupLastName}
-                />
+                <Pressable style={styles.secondaryBtn} onPress={sendLoginCode} disabled={busy}>
+                  {busy ? <ActivityIndicator color="#1d4ed8" /> : <Text style={styles.secondaryBtnText}>Send code</Text>}
+                </Pressable>
+                <Pressable
+                  style={styles.authModeToggle}
+                  onPress={toggleAuthSignUpMode}
+                  disabled={busy}
+                  accessibilityRole="button"
+                  accessibilityLabel={authIsSignUp ? "Switch to sign in" : "Switch to create account"}
+                >
+                  <Text style={styles.authModeToggleText}>
+                    {authIsSignUp ? "Already have an account? Sign in" : "Need an account? Create one"}
+                  </Text>
+                </Pressable>
               </>
             ) : null}
-            <TextInput
-              style={styles.input}
-              placeholder="Mobile number"
-              autoCapitalize="none"
-              keyboardType="phone-pad"
-              textContentType="telephoneNumber"
-              autoComplete="tel"
-              value={loginPhone}
-              onChangeText={setLoginPhone}
-            />
-            <Pressable style={styles.secondaryBtn} onPress={sendLoginCode} disabled={busy}>
-              {busy ? <ActivityIndicator color="#1d4ed8" /> : <Text style={styles.secondaryBtnText}>Send code</Text>}
-            </Pressable>
-            <Pressable
-              style={styles.authModeToggle}
-              onPress={toggleAuthSignUpMode}
-              disabled={busy}
-              accessibilityRole="button"
-              accessibilityLabel={authIsSignUp ? "Switch to sign in" : "Switch to create account"}
-            >
-              <Text style={styles.authModeToggleText}>
-                {authIsSignUp ? "Already have an account? Sign in" : "Need an account? Create one"}
-              </Text>
-            </Pressable>
-          </>
-        ) : null}
+          </ScrollView>
+        </KeyboardAvoidingView>
         <Modal
           visible={loginOtpSent}
           animationType="slide"
@@ -3610,9 +3623,15 @@ const styles = StyleSheet.create({
   auth: {
     flex: 1,
     padding: 24,
-    justifyContent: "center",
-    gap: 12,
     backgroundColor: "#f8fafc",
+  },
+  authKeyboard: { flex: 1 },
+  authScroll: { flex: 1 },
+  authScrollContent: {
+    flexGrow: 1,
+    gap: 12,
+    justifyContent: "center",
+    paddingBottom: 32,
   },
   title: { fontSize: 24, ...pj.b, marginBottom: 8 },
   apiHint: { fontSize: 11, ...pj.r, color: "#64748b", marginBottom: 12 },
