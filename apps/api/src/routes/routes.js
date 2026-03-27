@@ -1,17 +1,9 @@
 import { Router } from "express";
 import { authMiddleware } from "../middleware/auth.js";
 import { getDrivingRouteCoordinates } from "../googleDirections.js";
+import { directionsApiKey } from "../lib/mapsKeys.js";
 
 const r = Router();
-
-function directionsApiKey() {
-  return (
-    process.env.GOOGLE_DIRECTIONS_API_KEY ||
-    process.env.GOOGLE_DISTANCE_MATRIX_API_KEY ||
-    process.env.GOOGLE_MAPS_SERVER_API_KEY ||
-    ""
-  );
-}
 
 /**
  * Authenticated driving route for map preview (decoded overview path).

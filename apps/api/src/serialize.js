@@ -13,9 +13,15 @@ function lastInitialFrom(lastName, fallbackName) {
   return "";
 }
 
+function userIsDriver(user) {
+  if (!user) return false;
+  if (user.role === "driver") return true;
+  return Array.isArray(user.roles) && user.roles.includes("driver");
+}
+
 /** Rider-facing driver card (no private fields). */
 export function serializeDriverPublic(user) {
-  if (!user || user.role !== "driver") return undefined;
+  if (!userIsDriver(user)) return undefined;
   const firstFromName = trimOrEmpty(user.name).split(/\s+/)[0] || "";
   const firstName = trimOrEmpty(user.firstName) || firstFromName || "Driver";
   const lastInitial = lastInitialFrom(user.lastName, user.name);
@@ -38,12 +44,20 @@ export function serializeDriverPublic(user) {
 /** Current user for GET /auth/me (no password hash). */
 export function serializeUserMe(user) {
   if (!user) return null;
+  const roles =
+    Array.isArray(user.roles) && user.roles.length > 0
+      ? user.roles
+      : user.role
+        ? [user.role]
+        : ["rider"];
   const base = {
     _id: String(user._id),
-    email: user.email,
+    email: user.email ?? "",
     name: user.name,
-    role: user.role,
+    role: user.role || roles[0] || "rider",
+    roles,
     isAdmin: Boolean(user.isAdmin),
+    phoneE164: trimOrEmpty(user.phoneE164),
     phone: trimOrEmpty(user.phone),
     firstName: trimOrEmpty(user.firstName),
     lastName: trimOrEmpty(user.lastName),
@@ -61,7 +75,7 @@ export function serializeUserMe(user) {
     createdAt: user.createdAt?.toISOString?.(),
     updatedAt: user.updatedAt?.toISOString?.(),
   };
-  if (user.role === "driver") {
+  if (userIsDriver(user)) {
     base.driverPublic = serializeDriverPublic(user);
   }
   return base;
@@ -80,7 +94,7 @@ function riderIdFromTripDoc(t) {
 }
 
 function isPopulatedDriver(driver) {
-  return driver != null && typeof driver === "object" && driver._id != null && driver.role === "driver";
+  return driver != null && typeof driver === "object" && driver._id != null && userIsDriver(driver);
 }
 
 /** Plain { lat, lng } for JSON (Mongoose subdocs / odd shapes safe). */
@@ -131,6 +145,19 @@ export function serializeTrip(t, options = {}) {
           },
         }
       : {}),
+    ...(t.etaToDropoff?.computedAt
+      ? {
+          etaToDropoff: {
+            durationSeconds: t.etaToDropoff.durationSeconds,
+            durationText: t.etaToDropoff.durationText,
+            distanceMeters: t.etaToDropoff.distanceMeters,
+            distanceText: t.etaToDropoff.distanceText,
+            summaryMinutes: t.etaToDropoff.summaryMinutes,
+            usesTraffic: Boolean(t.etaToDropoff.usesTraffic),
+            computedAt: t.etaToDropoff.computedAt.toISOString(),
+          },
+        }
+      : {}),
     ...(t.fareEstimate?.computedAt && typeof t.fareEstimate.total === "number"
       ? {
           fareEstimate: {
@@ -138,6 +165,32 @@ export function serializeTrip(t, options = {}) {
             total: t.fareEstimate.total,
             breakdown: t.fareEstimate.breakdown,
             computedAt: t.fareEstimate.computedAt.toISOString(),
+          },
+        }
+      : {}),
+    ...(t.deadheadRoute?.computedAt
+      ? {
+          deadheadRoute: {
+            computedAt: t.deadheadRoute.computedAt.toISOString(),
+            provider: t.deadheadRoute.provider || "google_directions",
+            origin: t.deadheadRoute.origin,
+            destination: t.deadheadRoute.destination,
+            distanceM: t.deadheadRoute.distanceM,
+            durationSec: t.deadheadRoute.durationSec,
+            encodedPolyline: t.deadheadRoute.encodedPolyline,
+          },
+        }
+      : {}),
+    ...(t.rideRoute?.computedAt
+      ? {
+          rideRoute: {
+            computedAt: t.rideRoute.computedAt.toISOString(),
+            provider: t.rideRoute.provider || "google_directions",
+            origin: t.rideRoute.origin,
+            destination: t.rideRoute.destination,
+            distanceM: t.rideRoute.distanceM,
+            durationSec: t.rideRoute.durationSec,
+            encodedPolyline: t.rideRoute.encodedPolyline,
           },
         }
       : {}),

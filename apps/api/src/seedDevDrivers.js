@@ -1,5 +1,6 @@
 import bcrypt from "bcryptjs";
 import { User } from "./models/User.js";
+import { DriverProfile } from "./models/DriverProfile.js";
 
 const SEEDS = [
   {
@@ -40,11 +41,12 @@ export async function seedDevDriversIfNeeded() {
     const email = s.email.toLowerCase();
     const existing = await User.findOne({ email }).exec();
     if (existing) continue;
-    await User.create({
+    const created = await User.create({
       email,
       passwordHash,
       name: s.name,
       role: "driver",
+      roles: ["driver"],
       firstName: s.firstName,
       lastName: s.lastName,
       avatarUrl: "",
@@ -52,9 +54,39 @@ export async function seedDevDriversIfNeeded() {
       isAdmin: Boolean(s.isAdmin),
       phone: typeof s.phone === "string" ? s.phone : "",
     });
+    await DriverProfile.create({
+      userId: created._id,
+      driverStatus: "active",
+      vehicle: {
+        make: s.vehicle.make || "",
+        model: s.vehicle.model || "",
+        color: s.vehicle.color || "",
+        licensePlate: s.vehicle.licensePlate || "",
+      },
+      avatarUrl: "",
+    }).catch((e) => console.error("[tnc] seed DriverProfile", e));
   }
   await User.updateOne(
     { email: "driver1@tnc.local" },
     { $set: { isAdmin: true, phone: "+1-555-0100" } }
   ).exec();
+
+  for (const s of SEEDS) {
+    const email = s.email.toLowerCase();
+    const u = await User.findOne({ email }).exec();
+    if (!u) continue;
+    const has = await DriverProfile.findOne({ userId: u._id }).exec();
+    if (has) continue;
+    await DriverProfile.create({
+      userId: u._id,
+      driverStatus: "active",
+      vehicle: {
+        make: s.vehicle.make || "",
+        model: s.vehicle.model || "",
+        color: s.vehicle.color || "",
+        licensePlate: s.vehicle.licensePlate || "",
+      },
+      avatarUrl: "",
+    }).catch((e) => console.error("[tnc] seed DriverProfile backfill", e));
+  }
 }

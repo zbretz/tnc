@@ -8,7 +8,7 @@ const latLngSchema = new mongoose.Schema(
   { _id: false }
 );
 
-const etaToPickupSchema = new mongoose.Schema(
+const drivingEtaLegSchema = new mongoose.Schema(
   {
     durationSeconds: Number,
     durationText: String,
@@ -27,6 +27,28 @@ const fareEstimateSchema = new mongoose.Schema(
     total: Number,
     breakdown: mongoose.Schema.Types.Mixed,
     computedAt: Date,
+  },
+  { _id: false }
+);
+
+/** Google Directions snapshot: driver → pickup (at accept) or pickup → dropoff (at in_progress). */
+const routedSegmentSchema = new mongoose.Schema(
+  {
+    computedAt: { type: Date },
+    provider: { type: String, default: "google_directions" },
+    origin: {
+      lat: Number,
+      lng: Number,
+      accuracyM: Number,
+      recordedAt: Date,
+    },
+    destination: {
+      lat: Number,
+      lng: Number,
+    },
+    distanceM: Number,
+    durationSec: Number,
+    encodedPolyline: String,
   },
   { _id: false }
 );
@@ -50,10 +72,17 @@ const tripSchema = new mongoose.Schema(
       lng: Number,
       updatedAt: Date,
     },
-    /** Server-computed driving ETA to pickup (Distance Matrix); pushed via trip:updated */
-    etaToPickup: { type: etaToPickupSchema, default: null },
+    /** Server-computed driving ETA driver → pickup while accepted */
+    etaToPickup: { type: drivingEtaLegSchema, default: null },
+    /** Server-computed driving ETA driver → dropoff while in_progress */
+    etaToDropoff: { type: drivingEtaLegSchema, default: null },
     /** Snapshot from computeFareEstimate at trip creation when dropoff is set */
     fareEstimate: { type: fareEstimateSchema, default: null },
+
+    /** Routed driving path: driver at accept → pickup pin (snapshot). */
+    deadheadRoute: { type: routedSegmentSchema, default: null },
+    /** Routed driving path: pickup pin → dropoff pin (snapshot at in_progress). */
+    rideRoute: { type: routedSegmentSchema, default: null },
   },
   { timestamps: true }
 );

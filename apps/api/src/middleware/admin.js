@@ -2,7 +2,8 @@ import { User } from "../models/User.js";
 
 /** Must run after authMiddleware. Driver account with isAdmin on the user document. */
 export async function requireDriverAdmin(req, res, next) {
-  if (req.userRole !== "driver") {
+  const roles = req.userRoles || [];
+  if (!roles.includes("driver")) {
     res.status(403).json({ error: "Admin tools require a driver account" });
     return;
   }

@@ -1010,6 +1010,11 @@ export default function App() {
               : !enRouteDropoff && me
                 ? "\nETA to pickup: updating…"
                 : ""}
+            {enRouteDropoff && activeTrip?.etaToDropoff
+              ? `\nETA to dropoff: ${activeTrip.etaToDropoff.durationText || `~${activeTrip.etaToDropoff.summaryMinutes} min`}${activeTrip.etaToDropoff.distanceText ? ` · ${activeTrip.etaToDropoff.distanceText}` : ""}${activeTrip.etaToDropoff.usesTraffic ? " (traffic)" : ""}`
+              : enRouteDropoff && me
+                ? "\nETA to dropoff: updating…"
+                : ""}
           </Text>
           <View style={styles.row}>
             {!enRouteDropoff ? (

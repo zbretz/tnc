@@ -41,13 +41,7 @@ export function decodeGooglePolyline(encoded) {
   return coords;
 }
 
-/**
- * @param {{ lat: number, lng: number }} origin
- * @param {{ lat: number, lng: number }} destination
- * @param {string} apiKey
- * @returns {Promise<{ ok: true, coordinates: { lat: number, lng: number }[] } | { ok: false, error: string }>}
- */
-export async function getDrivingRouteCoordinates(origin, destination, apiKey) {
+async function fetchDirectionsJson(origin, destination, apiKey) {
   if (!apiKey || typeof apiKey !== "string") {
     dirLog("skip: missing API key");
     return { ok: false, error: "missing_key" };
@@ -87,7 +81,20 @@ export async function getDrivingRouteCoordinates(origin, destination, apiKey) {
     return { ok: false, error: data?.error_message || data?.status || "no_route" };
   }
 
-  const encoded = data.routes[0]?.overview_polyline?.points;
+  return { ok: true, data, ms: Date.now() - t0 };
+}
+
+/**
+ * @param {{ lat: number, lng: number }} origin
+ * @param {{ lat: number, lng: number }} destination
+ * @param {string} apiKey
+ * @returns {Promise<{ ok: true, coordinates: { lat: number, lng: number }[] } | { ok: false, error: string }>}
+ */
+export async function getDrivingRouteCoordinates(origin, destination, apiKey) {
+  const parsed = await fetchDirectionsJson(origin, destination, apiKey);
+  if (!parsed.ok) return parsed;
+
+  const encoded = parsed.data.routes[0]?.overview_polyline?.points;
   if (typeof encoded !== "string" || !encoded.length) {
     dirLog("no overview polyline");
     return { ok: false, error: "no_polyline" };
@@ -98,6 +105,36 @@ export async function getDrivingRouteCoordinates(origin, destination, apiKey) {
     return { ok: false, error: "decode_short" };
   }
 
-  dirLog("ok", coordinates.length, "points", Date.now() - t0, "ms");
+  dirLog("ok", coordinates.length, "points", parsed.ms, "ms");
   return { ok: true, coordinates };
+}
+
+/**
+ * Distance/duration + overview polyline from Directions API (same request as coordinates).
+ * @returns {Promise<{ ok: true, distanceM: number, durationSec: number, encodedPolyline: string } | { ok: false, error: string }>}
+ */
+export async function fetchDrivingRouteSummary(origin, destination, apiKey) {
+  const parsed = await fetchDirectionsJson(origin, destination, apiKey);
+  if (!parsed.ok) return parsed;
+
+  const route = parsed.data.routes[0];
+  const leg = route?.legs?.[0];
+  const encoded = route?.overview_polyline?.points;
+  if (typeof encoded !== "string" || !encoded.length) {
+    dirLog("no overview polyline");
+    return { ok: false, error: "no_polyline" };
+  }
+  const distanceM = typeof leg?.distance?.value === "number" ? leg.distance.value : undefined;
+  const durationSec =
+    typeof leg?.duration_in_traffic?.value === "number"
+      ? leg.duration_in_traffic.value
+      : typeof leg?.duration?.value === "number"
+        ? leg.duration.value
+        : undefined;
+  if (!Number.isFinite(distanceM) || !Number.isFinite(durationSec)) {
+    return { ok: false, error: "no_leg_metrics" };
+  }
+
+  dirLog("summary ok", distanceM, "m", durationSec, "s", parsed.ms, "ms");
+  return { ok: true, distanceM, durationSec, encodedPolyline: encoded };
 }

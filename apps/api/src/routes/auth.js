@@ -1,14 +1,67 @@
 import { Router } from "express";
+import crypto from "crypto";
 import bcrypt from "bcryptjs";
 import mongoose from "mongoose";
 import { User } from "../models/User.js";
+import { DriverProfile } from "../models/DriverProfile.js";
+import { OtpChallenge } from "../models/OtpChallenge.js";
 import { authMiddleware, signToken } from "../middleware/auth.js";
 import { serializeUserMe } from "../serialize.js";
+import { normalizePhoneE164 } from "../lib/phone.js";
 
 const r = Router();
 
+const OTP_COOLDOWN_MS = 60_000;
+const OTP_TTL_MS = 10 * 60_000;
+const OTP_MAX_ATTEMPTS = 5;
+
 function devAuthEnabled() {
   return process.env.TNC_DEV_AUTH === "1";
+}
+
+function otpPepper() {
+  return process.env.OTP_PEPPER || process.env.JWT_SECRET || "dev-only-change-me";
+}
+
+function hashOtpCode(phoneE164, code) {
+  return crypto.createHmac("sha256", otpPepper()).update(`${phoneE164}:${code}`).digest("hex");
+}
+
+function randomSixDigitCode() {
+  const n = crypto.randomInt(0, 1_000_000);
+  return String(n).padStart(6, "0");
+}
+
+async function sendOtpSms(phoneE164, code) {
+  const sid = process.env.TWILIO_ACCOUNT_SID;
+  const token = process.env.TWILIO_AUTH_TOKEN;
+  const from = process.env.TWILIO_PHONE_NUMBER;
+  if (!sid || !token || !from) {
+    if (process.env.TNC_DEV_OTP_LOG === "1") {
+      console.log("[tnc:otp] SMS not configured; code for", phoneE164, "=", code);
+    }
+    return { ok: false, skipped: true };
+  }
+  const auth = Buffer.from(`${sid}:${token}`).toString("base64");
+  const body = new URLSearchParams({
+    To: phoneE164,
+    From: from,
+    Body: `Your TNC verification code: ${code}`,
+  });
+  const res = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${sid}/Messages.json`, {
+    method: "POST",
+    headers: {
+      Authorization: `Basic ${auth}`,
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+    body,
+  });
+  if (!res.ok) {
+    const t = await res.text();
+    console.error("[tnc:otp] Twilio error", res.status, t);
+    return { ok: false, error: "sms_send_failed" };
+  }
+  return { ok: true };
 }
 
 /** MVP: allow HTTPS or data URLs; cap size before moving uploads to object storage. */
@@ -48,6 +101,91 @@ function splitNameForDriver(name, firstNameIn, lastNameIn) {
   return { first, last };
 }
 
+/**
+ * POST /auth/otp/start { phone }
+ * POST /auth/otp/verify { phone, code }
+ */
+r.post("/otp/start", async (req, res) => {
+  const phoneE164 = normalizePhoneE164(req.body?.phone);
+  if (!phoneE164) {
+    res.status(400).json({ error: "Valid phone number required" });
+    return;
+  }
+  const latest = await OtpChallenge.findOne({ phoneE164 }).sort({ createdAt: -1 }).exec();
+  if (latest && !latest.consumedAt && Date.now() - latest.createdAt.getTime() < OTP_COOLDOWN_MS) {
+    res.status(429).json({ error: "Please wait before requesting another code" });
+    return;
+  }
+  const code = randomSixDigitCode();
+  const codeHash = hashOtpCode(phoneE164, code);
+  const expiresAt = new Date(Date.now() + OTP_TTL_MS);
+  await OtpChallenge.create({ phoneE164, codeHash, expiresAt, attempts: 0 });
+  const sms = await sendOtpSms(phoneE164, code);
+  if (!sms.ok && !sms.skipped) {
+    res.status(502).json({ error: "Could not send SMS" });
+    return;
+  }
+  res.status(201).json({ ok: true });
+});
+
+r.post("/otp/verify", async (req, res) => {
+  const phoneE164 = normalizePhoneE164(req.body?.phone);
+  const codeRaw = req.body?.code != null ? String(req.body.code).trim() : "";
+  if (!phoneE164 || !/^\d{4,8}$/.test(codeRaw)) {
+    res.status(400).json({ error: "phone and code required" });
+    return;
+  }
+  const challenge = await OtpChallenge.findOne({ phoneE164 }).sort({ createdAt: -1 }).exec();
+  if (!challenge || challenge.consumedAt) {
+    res.status(400).json({ error: "No active code" });
+    return;
+  }
+  if (challenge.expiresAt.getTime() < Date.now()) {
+    res.status(400).json({ error: "Code expired" });
+    return;
+  }
+  if (challenge.attempts >= OTP_MAX_ATTEMPTS) {
+    res.status(400).json({ error: "Too many attempts" });
+    return;
+  }
+  const expected = challenge.codeHash;
+  const actual = hashOtpCode(phoneE164, codeRaw);
+  if (expected.length !== actual.length) {
+    challenge.attempts += 1;
+    await challenge.save();
+    res.status(401).json({ error: "Invalid code" });
+    return;
+  }
+  const ok = crypto.timingSafeEqual(Buffer.from(expected, "hex"), Buffer.from(actual, "hex"));
+  if (!ok) {
+    challenge.attempts += 1;
+    await challenge.save();
+    res.status(401).json({ error: "Invalid code" });
+    return;
+  }
+  challenge.consumedAt = new Date();
+  await challenge.save();
+
+  let user = await User.findOne({ phoneE164 }).exec();
+  if (!user) {
+    user = await User.create({
+      phoneE164,
+      name: "Rider",
+      role: "rider",
+      roles: ["rider"],
+      phoneVerifiedAt: new Date(),
+      phone: phoneE164,
+    });
+  } else {
+    user.phoneVerifiedAt = new Date();
+    if (!user.phone) user.phone = phoneE164;
+    await user.save();
+  }
+  const token = signToken(String(user._id), user);
+  const fresh = await User.findById(user._id).select("-passwordHash").exec();
+  res.json({ token, user: serializeUserMe(fresh) });
+});
+
 r.post("/register", async (req, res) => {
   const {
     email,
@@ -75,6 +213,7 @@ r.post("/register", async (req, res) => {
     passwordHash,
     name: String(name).trim(),
     role,
+    roles: [role],
   };
   if (role === "rider" && phoneIn != null && String(phoneIn).trim()) {
     doc.phone = String(phoneIn).trim().slice(0, 32);
@@ -97,7 +236,20 @@ r.post("/register", async (req, res) => {
     doc.vehicle = veh;
   }
   const user = await User.create(doc);
-  const token = signToken(String(user._id), user.role);
+  if (role === "driver") {
+    await DriverProfile.create({
+      userId: user._id,
+      driverStatus: "pending",
+      vehicle: {
+        make: doc.vehicle?.make || "",
+        model: doc.vehicle?.model || "",
+        color: doc.vehicle?.color || "",
+        licensePlate: doc.vehicle?.licensePlate || "",
+      },
+      avatarUrl: typeof doc.avatarUrl === "string" ? doc.avatarUrl : "",
+    }).catch((e) => console.error("[tnc] DriverProfile create", e));
+  }
+  const token = signToken(String(user._id), user);
   res.status(201).json({
     token,
     user: serializeUserMe(user),
@@ -111,11 +263,11 @@ r.post("/login", async (req, res) => {
     return;
   }
   const user = await User.findOne({ email: email.toLowerCase() });
-  if (!user || !(await bcrypt.compare(password, user.passwordHash))) {
+  if (!user?.passwordHash || !(await bcrypt.compare(password, user.passwordHash))) {
     res.status(401).json({ error: "Invalid credentials" });
     return;
   }
-  const token = signToken(String(user._id), user.role);
+  const token = signToken(String(user._id), user);
   res.json({
     token,
     user: serializeUserMe(user),
@@ -127,7 +279,9 @@ r.get("/dev/drivers", async (req, res) => {
     res.status(404).json({ error: "Not found" });
     return;
   }
-  const drivers = await User.find({ role: "driver" })
+  const drivers = await User.find({
+    $or: [{ role: "driver" }, { roles: { $in: ["driver"] } }],
+  })
     .select("email name firstName lastName vehicle isAdmin")
     .sort({ email: 1 })
     .lean()
@@ -163,11 +317,12 @@ r.post("/dev/login", async (req, res) => {
     return;
   }
   const user = await User.findById(driverId).exec();
-  if (!user || user.role !== "driver") {
+  const isDriver = user && (user.role === "driver" || (Array.isArray(user.roles) && user.roles.includes("driver")));
+  if (!user || !isDriver) {
     res.status(404).json({ error: "Driver not found" });
     return;
   }
-  const token = signToken(String(user._id), user.role);
+  const token = signToken(String(user._id), user);
   res.json({ token, user: serializeUserMe(user) });
 });
 
@@ -186,7 +341,7 @@ r.patch("/me", authMiddleware, async (req, res) => {
     res.status(404).json({ error: "Not found" });
     return;
   }
-  const { name, firstName, lastName, avatarUrl: avatarIn, vehicle: vehicleRaw } = req.body || {};
+  const { name, firstName, lastName, avatarUrl: avatarIn, vehicle: vehicleRaw, phone: phoneIn } = req.body || {};
   if (name != null) {
     const t = String(name).trim();
     if (!t) {
@@ -195,7 +350,7 @@ r.patch("/me", authMiddleware, async (req, res) => {
     }
     user.name = t;
   }
-  if (user.role === "driver") {
+  if (user.role === "driver" || (Array.isArray(user.roles) && user.roles.includes("driver"))) {
     if (firstName != null) user.firstName = String(firstName).trim().slice(0, 80);
     if (lastName != null) user.lastName = String(lastName).trim().slice(0, 80);
     if (avatarIn !== undefined) {

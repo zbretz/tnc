@@ -5,6 +5,7 @@ import { createServer } from "http";
 import { Server } from "socket.io";
 import mongoose from "mongoose";
 import { Trip } from "./models/Trip.js";
+import { DriverProfile } from "./models/DriverProfile.js";
 import { authRouter } from "./routes/auth.js";
 import { createTripsRouter } from "./routes/trips.js";
 import { verifyToken } from "./middleware/auth.js";
@@ -21,8 +22,17 @@ import { routesRouter } from "./routes/routes.js";
 import { pricingRouter } from "./routes/pricing.js";
 
 const PORT = Number(process.env.PORT) || 3000;
-// const MONGODB_URI = process.env.MONGODB_URI || "mongodb://127.0.0.1:27017/tnc";
-const MONGODB_URI = `mongodb+srv://zach:zach@tnc.uulxsfp.mongodb.net/`; 
+
+const MONGODB_URI_RAW = process.env.MONGODB_URI;
+const MONGODB_URI =
+  typeof MONGODB_URI_RAW === "string" && MONGODB_URI_RAW.trim() !== ""
+    ? MONGODB_URI_RAW.trim()
+    : "mongodb://127.0.0.1:27017/tnc";
+if (!MONGODB_URI_RAW || String(MONGODB_URI_RAW).trim() === "") {
+  console.warn(
+    "[tnc] MONGODB_URI not set; using local default mongodb://127.0.0.1:27017/tnc (set apps/api/.env for Atlas)."
+  );
+}
 
 const app = express();
 app.use(cors({ origin: true, credentials: true }));
@@ -87,7 +97,9 @@ io.use((socket, next) => {
   try {
     const payload = verifyToken(token);
     socket.data.userId = payload.sub;
-    socket.data.role = payload.role;
+    const roles = Array.isArray(payload.roles) && payload.roles.length > 0 ? payload.roles : payload.role ? [payload.role] : ["rider"];
+    socket.data.role = roles[0] || payload.role;
+    socket.data.roles = roles;
     next();
   } catch {
     next(new Error("Unauthorized"));
@@ -95,11 +107,12 @@ io.use((socket, next) => {
 });
 
 io.on("connection", (socket) => {
-  const { userId, role } = socket.data;
-  if (role === "driver") {
+  const { userId, role, roles } = socket.data;
+  const roleList = Array.isArray(roles) && roles.length > 0 ? roles : role ? [role] : [];
+  if (roleList.includes("driver")) {
     socket.join("drivers");
   }
-  if (role === "rider") {
+  if (roleList.includes("rider")) {
     socket.join("riders");
     getRiderServiceConfig()
       .then((cfg) => socket.emit("riderService:updated", riderFacingRiderServicePayload(cfg)))
@@ -134,6 +147,15 @@ io.on("connection", (socket) => {
     const now = new Date();
     trip.driverLocation = { lat, lng, updatedAt: now };
     await trip.save();
+    await DriverProfile.updateOne(
+      { userId },
+      {
+        $set: {
+          currentLocation: { type: "Point", coordinates: [lng, lat] },
+          locationUpdatedAt: now,
+        },
+      }
+    ).exec();
     await tryRefreshPickupEta(trip, lat, lng);
     const fresh = await Trip.findById(tripId)
       .populate({ path: "driver", select: "-passwordHash" })
@@ -148,12 +170,18 @@ io.on("connection", (socket) => {
   });
 });
 
-mongoose.connect(MONGODB_URI).then(async () => {
-  await ensureAppSettings().catch((e) => console.error("[tnc] ensureAppSettings", e));
-  if (process.env.TNC_DEV_AUTH === "1") {
-    await seedDevDriversIfNeeded().catch((e) => console.error("[tnc] seedDevDriversIfNeeded", e));
-  }
-  httpServer.listen(PORT, () => {
-    console.log(`API + Socket.io http://10.0.0.135:${PORT}`);
+mongoose
+  .connect(MONGODB_URI)
+  .then(async () => {
+    await ensureAppSettings().catch((e) => console.error("[tnc] ensureAppSettings", e));
+    if (process.env.TNC_DEV_AUTH === "1") {
+      await seedDevDriversIfNeeded().catch((e) => console.error("[tnc] seedDevDriversIfNeeded", e));
+    }
+    httpServer.listen(PORT, "0.0.0.0", () => {
+      console.log(`API + Socket.io listening on http://0.0.0.0:${PORT} (use your LAN IP from a device)`);
+    });
+  })
+  .catch((err) => {
+    console.error("[tnc] MongoDB connection failed:", err?.message || err);
+    process.exit(1);
   });
-});

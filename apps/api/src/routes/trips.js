@@ -1,12 +1,16 @@
 import { Router } from "express";
 import mongoose from "mongoose";
 import { Trip } from "../models/Trip.js";
-import { User } from "../models/User.js";
+import { User, rolesFromUserDoc } from "../models/User.js";
+import { DriverProfile } from "../models/DriverProfile.js";
 import { authMiddleware, requireRole } from "../middleware/auth.js";
 import { serializeTrip } from "../serialize.js";
 import { clearPickupEtaThrottle, tryRefreshPickupEta } from "../pickupEta.js";
 import { getRiderServiceConfig } from "../models/AppSettings.js";
 import { computeFareEstimate } from "../fareEstimate.js";
+import { fetchDrivingRouteSummary } from "../googleDirections.js";
+import { directionsApiKey } from "../lib/mapsKeys.js";
+import { recordTripStatusEvent } from "../lib/tripEvents.js";
 
 const POPULATE_DRIVER = { path: "driver", select: "-passwordHash" };
 
@@ -65,8 +69,9 @@ export function createTripsRouter(deps) {
       return;
     }
     const uid = String(req.userId || "");
-    const actor = await User.findById(uid).select("isAdmin role").lean().exec();
-    const isDriverAdmin = actor?.role === "driver" && actor?.isAdmin === true;
+    const actor = await User.findById(uid).select("isAdmin role roles").lean().exec();
+    const actorRoles = rolesFromUserDoc(actor);
+    const isDriverAdmin = actorRoles.includes("driver") && actor?.isAdmin === true;
     const isRider = String(trip.rider) === uid;
     const isDriver = trip.driver != null && tripDriverIdString(trip) === uid;
     if (["completed", "cancelled"].includes(trip.status)) {
@@ -91,10 +96,20 @@ export function createTripsRouter(deps) {
       res.status(400).json({ error: "Cannot cancel" });
       return;
     }
+    const prev = trip.status;
     trip.status = "cancelled";
     trip.etaToPickup = null;
+    trip.etaToDropoff = null;
     clearPickupEtaThrottle(id);
     await trip.save();
+    await recordTripStatusEvent({
+      tripId: trip._id,
+      fromStatus: prev,
+      toStatus: "cancelled",
+      actorUserId: uid,
+      actorRoles,
+      payload: {},
+    }).catch((e) => console.error("[tnc] TripEvent cancel", e));
     const out = await loadTripSerialized(id);
     deps.onTripUpdated(out);
     res.json({ trip: out });
@@ -201,15 +216,72 @@ export function createTripsRouter(deps) {
       res.status(400).json({ error: "Invalid id" });
       return;
     }
-    const updated = await Trip.findOneAndUpdate(
-      { _id: id, status: "requested" },
-      { $set: { driver: req.userId, status: "accepted" } },
-      { new: true }
-    ).exec();
+    const trip = await Trip.findOne({ _id: id, status: "requested" }).exec();
+    if (!trip) {
+      res.status(409).json({ error: "Trip not available" });
+      return;
+    }
+    const body = req.body || {};
+    let oLat = typeof body.driverLat === "number" ? body.driverLat : Number(body.driverLat);
+    let oLng = typeof body.driverLng === "number" ? body.driverLng : Number(body.driverLng);
+    if (!Number.isFinite(oLat) || !Number.isFinite(oLng)) {
+      const prof = await DriverProfile.findOne({ userId: req.userId }).lean().exec();
+      const coords = prof?.currentLocation?.coordinates;
+      if (Array.isArray(coords) && coords.length >= 2) {
+        oLng = Number(coords[0]);
+        oLat = Number(coords[1]);
+      }
+    }
+    const now = new Date();
+    const set = {
+      driver: req.userId,
+      status: "accepted",
+    };
+    const key = directionsApiKey();
+    if (key && Number.isFinite(oLat) && Number.isFinite(oLng)) {
+      const summary = await fetchDrivingRouteSummary(
+        { lat: oLat, lng: oLng },
+        { lat: trip.pickup.lat, lng: trip.pickup.lng },
+        key
+      );
+      if (summary.ok) {
+        set.deadheadRoute = {
+          computedAt: now,
+          provider: "google_directions",
+          origin: {
+            lat: oLat,
+            lng: oLng,
+            accuracyM: typeof body.accuracyM === "number" ? body.accuracyM : undefined,
+            recordedAt: now,
+          },
+          destination: { lat: trip.pickup.lat, lng: trip.pickup.lng },
+          distanceM: summary.distanceM,
+          durationSec: summary.durationSec,
+          encodedPolyline: summary.encodedPolyline,
+        };
+      }
+    }
+    const updated = await Trip.findOneAndUpdate({ _id: id, status: "requested" }, { $set: set }, { new: true }).exec();
     if (!updated) {
       res.status(409).json({ error: "Trip not available" });
       return;
     }
+    const actor = await User.findById(req.userId).select("role roles").lean().exec();
+    await recordTripStatusEvent({
+      tripId: updated._id,
+      fromStatus: "requested",
+      toStatus: "accepted",
+      actorUserId: req.userId,
+      actorRoles: rolesFromUserDoc(actor),
+      payload: set.deadheadRoute
+        ? {
+            deadhead: {
+              distanceM: set.deadheadRoute.distanceM,
+              durationSec: set.deadheadRoute.durationSec,
+            },
+          }
+        : {},
+    }).catch((e) => console.error("[tnc] TripEvent accept", e));
     const populated = await Trip.findById(updated._id).populate(POPULATE_DRIVER).exec();
     const out = serializeTrip(populated);
     deps.onTripUpdated(out);
@@ -242,10 +314,52 @@ export function createTripsRouter(deps) {
       res.status(400).json({ error: "Trip must be accepted" });
       return;
     }
+    const drop = trip.dropoff;
+    if (!drop || !Number.isFinite(drop.lat) || !Number.isFinite(drop.lng)) {
+      res.status(400).json({ error: "Trip missing dropoff" });
+      return;
+    }
+    const key = directionsApiKey();
+    const now = new Date();
+    if (key) {
+      const summary = await fetchDrivingRouteSummary(
+        { lat: trip.pickup.lat, lng: trip.pickup.lng },
+        { lat: drop.lat, lng: drop.lng },
+        key
+      );
+      if (summary.ok) {
+        trip.rideRoute = {
+          computedAt: now,
+          provider: "google_directions",
+          origin: { lat: trip.pickup.lat, lng: trip.pickup.lng, recordedAt: now },
+          destination: { lat: drop.lat, lng: drop.lng },
+          distanceM: summary.distanceM,
+          durationSec: summary.durationSec,
+          encodedPolyline: summary.encodedPolyline,
+        };
+      }
+    }
     trip.status = "in_progress";
     trip.etaToPickup = null;
+    trip.etaToDropoff = null;
     clearPickupEtaThrottle(id);
     await trip.save();
+    const actor = await User.findById(req.userId).select("role roles").lean().exec();
+    await recordTripStatusEvent({
+      tripId: trip._id,
+      fromStatus: "accepted",
+      toStatus: "in_progress",
+      actorUserId: req.userId,
+      actorRoles: rolesFromUserDoc(actor),
+      payload: trip.rideRoute
+        ? {
+            ride: {
+              distanceM: trip.rideRoute.distanceM,
+              durationSec: trip.rideRoute.durationSec,
+            },
+          }
+        : {},
+    }).catch((e) => console.error("[tnc] TripEvent start", e));
     const out = await loadTripSerialized(id);
     deps.onTripUpdated(out);
     res.json({ trip: out });
@@ -266,10 +380,21 @@ export function createTripsRouter(deps) {
       res.status(400).json({ error: "Trip not active" });
       return;
     }
+    const prev = trip.status;
     trip.status = "completed";
     trip.etaToPickup = null;
+    trip.etaToDropoff = null;
     clearPickupEtaThrottle(id);
     await trip.save();
+    const actor = await User.findById(req.userId).select("role roles").lean().exec();
+    await recordTripStatusEvent({
+      tripId: trip._id,
+      fromStatus: prev,
+      toStatus: "completed",
+      actorUserId: req.userId,
+      actorRoles: rolesFromUserDoc(actor),
+      payload: {},
+    }).catch((e) => console.error("[tnc] TripEvent complete", e));
     const out = await loadTripSerialized(id);
     deps.onTripUpdated(out);
     res.json({ trip: out });
@@ -298,6 +423,15 @@ export function createTripsRouter(deps) {
     const now = new Date();
     trip.driverLocation = { lat, lng, updatedAt: now };
     await trip.save();
+    await DriverProfile.updateOne(
+      { userId: req.userId },
+      {
+        $set: {
+          currentLocation: { type: "Point", coordinates: [lng, lat] },
+          locationUpdatedAt: now,
+        },
+      }
+    ).exec();
     await tryRefreshPickupEta(trip, lat, lng);
     const out = await loadTripSerialized(id);
     deps.onDriverLocation?.(id, {

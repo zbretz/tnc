@@ -59,20 +59,36 @@ export function buildEtaPayloadFromMatrix(result) {
 
 /**
  * After driver location is saved on `trip` (mongoose doc), optionally refresh Distance Matrix ETA and save.
- * Throttled to limit Google calls. Mutates `trip` and saves when ETA is refreshed.
+ * accepted → eta to pickup; in_progress → eta to dropoff. Throttled to limit Google calls.
  * @returns {{ refreshed: boolean, skipped?: string }}
  */
 export async function tryRefreshPickupEta(trip, driverLat, driverLng) {
   const tripId = String(trip._id);
-  if (trip.status !== "accepted") {
+  if (!["accepted", "in_progress"].includes(trip.status)) {
     return { refreshed: false, skipped: "status" };
-  }
-  const pickup = trip.pickup;
-  if (!pickup || !Number.isFinite(Number(pickup.lat)) || !Number.isFinite(Number(pickup.lng))) {
-    return { refreshed: false, skipped: "pickup" };
   }
   if (!Number.isFinite(Number(driverLat)) || !Number.isFinite(Number(driverLng))) {
     return { refreshed: false, skipped: "driver_coords" };
+  }
+
+  let destLat;
+  let destLng;
+  let leg = "pickup";
+  if (trip.status === "accepted") {
+    const pickup = trip.pickup;
+    if (!pickup || !Number.isFinite(Number(pickup.lat)) || !Number.isFinite(Number(pickup.lng))) {
+      return { refreshed: false, skipped: "pickup" };
+    }
+    destLat = Number(pickup.lat);
+    destLng = Number(pickup.lng);
+  } else {
+    const dropoff = trip.dropoff;
+    if (!dropoff || !Number.isFinite(Number(dropoff.lat)) || !Number.isFinite(Number(dropoff.lng))) {
+      return { refreshed: false, skipped: "dropoff" };
+    }
+    destLat = Number(dropoff.lat);
+    destLng = Number(dropoff.lng);
+    leg = "dropoff";
   }
 
   const gate = shouldCallGoogle(tripId, driverLat, driverLng);
@@ -86,10 +102,10 @@ export async function tryRefreshPickupEta(trip, driverLat, driverLng) {
   const t0 = Date.now();
   const result = await getDrivingDurationToDestination(
     { lat: Number(driverLat), lng: Number(driverLng) },
-    { lat: Number(pickup.lat), lng: Number(pickup.lng) },
+    { lat: destLat, lng: destLng },
     apiKey
   );
-  etaLog("matrix done", tripId, Date.now() - t0, "ms", gate.reason, result.ok ? "ok" : result.error);
+  etaLog("matrix done", tripId, leg, Date.now() - t0, "ms", gate.reason, result.ok ? "ok" : result.error);
 
   if (!result.ok) {
     return { refreshed: false, skipped: String(result.error) };
@@ -98,10 +114,14 @@ export async function tryRefreshPickupEta(trip, driverLat, driverLng) {
   const payload = buildEtaPayloadFromMatrix(result);
   if (!payload) return { refreshed: false, skipped: "no_payload" };
 
-  trip.etaToPickup = {
-    ...payload,
-    computedAt: new Date(),
-  };
+  const stamped = { ...payload, computedAt: new Date() };
+  if (trip.status === "accepted") {
+    trip.etaToPickup = stamped;
+    trip.etaToDropoff = null;
+  } else {
+    trip.etaToDropoff = stamped;
+    trip.etaToPickup = null;
+  }
   await trip.save();
   recordSuccessfulEtaFetch(tripId, driverLat, driverLng);
   return { refreshed: true };
