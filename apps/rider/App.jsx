@@ -34,7 +34,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import { io } from "socket.io-client";
 import { StatusBar } from "expo-status-bar";
 import { Ionicons } from "@expo/vector-icons";
-import { useStripe } from "@stripe/stripe-react-native";
+import { CardField, useStripe } from "@stripe/stripe-react-native";
 import { getApiUrl, getGoogleGeocodingApiKey, getGooglePlacesApiKey, getStripePublishableKey } from "./lib/config";
 import BottomSheet, { BottomSheetScrollView, BottomSheetTextInput } from "@gorhom/bottom-sheet";
 
@@ -677,7 +677,13 @@ export default function App() {
   const [addressPredictionsLoading, setAddressPredictionsLoading] = useState(false);
   const [keyboardInset, setKeyboardInset] = useState(0);
 
-  const { initPaymentSheet, presentPaymentSheet, retrieveSetupIntent, resetPaymentSheetCustomer } = useStripe();
+  const [addCardModalOpen, setAddCardModalOpen] = useState(false);
+  const [addCardFieldKey, setAddCardFieldKey] = useState(0);
+  const [addCardFieldComplete, setAddCardFieldComplete] = useState(false);
+  const [addCardSaving, setAddCardSaving] = useState(false);
+  const addCardModalRef = useRef({ resolve: /** @type {((v: boolean) => void) | null} */ (null), quietSuccess: false });
+
+  const { confirmSetupIntent, handleNextActionForSetup, resetPaymentSheetCustomer } = useStripe();
 
   /** Full planning reset — same baseline as a fresh “Select pickup” session (used after ride ends + on logout). */
   const resetPlanningToInitialPickup = useCallback(() => {
@@ -1409,6 +1415,66 @@ export default function App() {
     socketRef.current?.disconnect();
   };
 
+  const cancelAddCardModal = useCallback(() => {
+    if (addCardSaving) return;
+    const res = addCardModalRef.current.resolve;
+    addCardModalRef.current.resolve = null;
+    addCardModalRef.current.quietSuccess = false;
+    setAddCardModalOpen(false);
+    res?.(false);
+  }, [addCardSaving]);
+
+  const submitAddCardFromModal = useCallback(async () => {
+    if (!token) return;
+    setAddCardSaving(true);
+    const quietSuccess = addCardModalRef.current.quietSuccess;
+    try {
+      const { clientSecret } = await api("/payments/setup-intent", { method: "POST", token });
+      if (typeof clientSecret !== "string" || !clientSecret.length) {
+        throw new Error("No setup intent from server.");
+      }
+      let { error: cErr, setupIntent } = await confirmSetupIntent(
+        clientSecret,
+        { paymentMethodType: "Card" },
+        { setupFutureUsage: "OffSession" }
+      );
+      if (cErr) {
+        throw new Error(cErr.message || "Could not save card.");
+      }
+      if (setupIntent?.status === "RequiresAction") {
+        const next = await handleNextActionForSetup(clientSecret, STRIPE_RETURN_URL);
+        if (next.error) {
+          throw new Error(next.error.message || "Authentication failed.");
+        }
+        setupIntent = next.setupIntent;
+      }
+      if (setupIntent?.status !== "Succeeded") {
+        throw new Error("Card setup did not complete.");
+      }
+      const pmId = setupIntent.paymentMethod?.id || setupIntent.paymentMethodId || "";
+      if (typeof pmId !== "string" || !pmId.startsWith("pm_")) {
+        throw new Error("Card was saved but no payment method id was returned.");
+      }
+      await api("/payments/default-payment-method", {
+        method: "POST",
+        token,
+        body: { paymentMethodId: pmId },
+      });
+      if (!quietSuccess) {
+        Alert.alert("Card saved", "We will use this card for ride charges when billing is enabled.");
+      }
+      const res = addCardModalRef.current.resolve;
+      addCardModalRef.current.resolve = null;
+      addCardModalRef.current.quietSuccess = false;
+      setAddCardModalOpen(false);
+      res?.(true);
+    } catch (e) {
+      Alert.alert("Could not save card", e?.message ? String(e.message) : String(e));
+    } finally {
+      setAddCardSaving(false);
+    }
+  }, [token, confirmSetupIntent, handleNextActionForSetup]);
+
   /** @param {{ quietSuccess?: boolean, manageBusy?: boolean }} [opts] */
   const saveCardWithPaymentSheet = useCallback(
     async (opts = {}) => {
@@ -1436,43 +1502,12 @@ export default function App() {
           Alert.alert("Payments", "The server does not have Stripe enabled (set STRIPE_SECRET_KEY in apps/api/.env).");
           return false;
         }
-        const { clientSecret } = await api("/payments/setup-intent", { method: "POST", token });
-        if (typeof clientSecret !== "string" || !clientSecret.length) {
-          throw new Error("No setup intent from server.");
-        }
-        const init = await initPaymentSheet({
-          merchantDisplayName: "TNC Rider",
-          setupIntentClientSecret: clientSecret,
-          returnURL: STRIPE_RETURN_URL,
-          allowsDelayedPaymentMethods: false,
+        return await new Promise((resolve) => {
+          addCardModalRef.current = { resolve, quietSuccess };
+          setAddCardFieldComplete(false);
+          setAddCardFieldKey((k) => k + 1);
+          setAddCardModalOpen(true);
         });
-        if (init.error) {
-          throw new Error(init.error.message || "Could not open payment sheet.");
-        }
-        const pres = await presentPaymentSheet();
-        if (pres.error) {
-          const code = pres.error.code;
-          if (code === "Canceled" || code === "Cancelled") return false;
-          throw new Error(pres.error.message || "Payment sheet closed with an error.");
-        }
-        const retrieved = await retrieveSetupIntent(clientSecret);
-        if (retrieved.error) {
-          throw new Error(retrieved.error.message || "Could not confirm card setup.");
-        }
-        const pmId =
-          retrieved.setupIntent?.paymentMethod?.id || retrieved.setupIntent?.paymentMethodId || "";
-        if (typeof pmId !== "string" || !pmId.startsWith("pm_")) {
-          throw new Error("Card was saved but no payment method id was returned.");
-        }
-        await api("/payments/default-payment-method", {
-          method: "POST",
-          token,
-          body: { paymentMethodId: pmId },
-        });
-        if (!quietSuccess) {
-          Alert.alert("Card saved", "We will use this card for ride charges when billing is enabled.");
-        }
-        return true;
       } catch (e) {
         Alert.alert("Could not save card", e?.message ? String(e.message) : String(e));
         return false;
@@ -1480,7 +1515,7 @@ export default function App() {
         if (manageBusy) setBusy(false);
       }
     },
-    [token, initPaymentSheet, presentPaymentSheet, retrieveSetupIntent]
+    [token]
   );
 
   const openPaymentMethodSheet = useCallback(
@@ -2483,6 +2518,68 @@ export default function App() {
         explanation={riderService.fareFreeRiderExplanation}
         onClose={() => setFreeRideWhyOpen(false)}
       />
+      {Platform.OS !== "web" ? (
+        <Modal
+          visible={addCardModalOpen}
+          animationType="slide"
+          transparent
+          onRequestClose={cancelAddCardModal}
+        >
+          <KeyboardAvoidingView
+            style={styles.addCardModalRoot}
+            behavior={Platform.OS === "ios" ? "padding" : "height"}
+            keyboardVerticalOffset={Platform.OS === "ios" ? 12 : 0}
+          >
+            <Pressable
+              style={styles.addCardModalBackdrop}
+              onPress={cancelAddCardModal}
+              accessibilityLabel="Close add card"
+            />
+            <View style={styles.addCardModalSheet}>
+              <Text style={styles.addCardModalTitle}>Add card</Text>
+              <Text style={styles.addCardModalSub}>
+                Used for ride charges. Card details are sent to Stripe only, not to TNC servers.
+              </Text>
+              <CardField
+                key={addCardFieldKey}
+                postalCodeEnabled
+                countryCode="US"
+                style={styles.addCardField}
+                cardStyle={{
+                  borderWidth: 1,
+                  borderColor: "#e2e8f0",
+                  borderRadius: 8,
+                  backgroundColor: "#fff",
+                  fontSize: 16,
+                  placeholderColor: "#94a3b8",
+                }}
+                onCardChange={(c) => setAddCardFieldComplete(Boolean(c?.complete))}
+              />
+              <Pressable
+                style={[
+                  styles.addCardModalPrimary,
+                  (!addCardFieldComplete || addCardSaving) && styles.addCardModalBtnDisabled,
+                ]}
+                disabled={!addCardFieldComplete || addCardSaving}
+                onPress={() => void submitAddCardFromModal()}
+              >
+                {addCardSaving ? (
+                  <ActivityIndicator color="#fff" />
+                ) : (
+                  <Text style={styles.addCardModalPrimaryText}>Save card</Text>
+                )}
+              </Pressable>
+              <Pressable
+                style={styles.addCardModalSecondary}
+                disabled={addCardSaving}
+                onPress={cancelAddCardModal}
+              >
+                <Text style={styles.addCardModalSecondaryText}>Cancel</Text>
+              </Pressable>
+            </View>
+          </KeyboardAvoidingView>
+        </Modal>
+      ) : null}
       {showRidersClosedGate ? (
         <View style={styles.ridersClosedLayer} pointerEvents="box-none">
           <View style={styles.ridersClosedCard} pointerEvents="auto">
@@ -4129,6 +4226,40 @@ const styles = StyleSheet.create({
   bookRideCtaDisabled: { backgroundColor: "#9ca3af" },
   bookRideCtaText: { fontSize: 17, ...pj.sb, color: "#ffffff" },
   bookRideCtaTextMuted: { color: "rgba(255,255,255,0.9)" },
+  addCardModalRoot: {
+    flex: 1,
+    justifyContent: "flex-end",
+    backgroundColor: "rgba(15, 23, 42, 0.45)",
+  },
+  addCardModalBackdrop: {
+    ...StyleSheet.absoluteFillObject,
+  },
+  addCardModalSheet: {
+    backgroundColor: "#fff",
+    borderTopLeftRadius: 16,
+    borderTopRightRadius: 16,
+    paddingHorizontal: 20,
+    paddingTop: 20,
+    paddingBottom: Platform.OS === "ios" ? 28 : 20,
+  },
+  addCardModalTitle: { fontSize: 20, ...pj.sb, color: "#0f172a" },
+  addCardModalSub: { fontSize: 14, ...pj.r, color: "#64748b", marginTop: 8, marginBottom: 16 },
+  addCardField: { width: "100%", height: 52, marginBottom: 18 },
+  addCardModalPrimary: {
+    alignItems: "center",
+    justifyContent: "center",
+    paddingVertical: 14,
+    borderRadius: 10,
+    backgroundColor: "#000000",
+  },
+  addCardModalBtnDisabled: { backgroundColor: "#9ca3af" },
+  addCardModalPrimaryText: { fontSize: 16, ...pj.sb, color: "#ffffff" },
+  addCardModalSecondary: {
+    alignItems: "center",
+    paddingVertical: 14,
+    marginTop: 4,
+  },
+  addCardModalSecondaryText: { fontSize: 16, ...pj.m, color: "#475569" },
 });
 
 function BookRideTravelTimeRow({ styles, farePreview }) {
