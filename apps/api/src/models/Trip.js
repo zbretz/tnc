@@ -74,6 +74,8 @@ const tripSchema = new mongoose.Schema(
       lng: Number,
       updatedAt: Date,
     },
+    /** Set when the assigned driver signals they are at the pickup pin (accepted leg only). Cleared when the ride starts. */
+    driverArrivedAtPickupAt: { type: Date, default: null },
     /** Server-computed driving ETA driver → pickup while accepted */
     etaToPickup: { type: drivingEtaLegSchema, default: null },
     /** Server-computed driving ETA driver → dropoff while in_progress */

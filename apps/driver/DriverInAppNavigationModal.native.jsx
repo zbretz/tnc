@@ -38,15 +38,25 @@ function navigationInitErrorMessage(code) {
  * - Automatic: SDK {@link NavigationCallbacks.onArrival} when the vehicle reaches the final waypoint.
  * - Alternative not wired here: distance-to-destination in {@link onLocationChanged} (custom geofence).
  *
- * @param {{ onArrived?: (detail: { source: 'manual' | 'sdk' }) => void }} props
+ * @param {{ onArrived?: (detail: { source: 'manual' | 'sdk' }) => void; arrivalChromeEnabled?: boolean }} props
  */
-export default function DriverInAppNavigationModal({ visible, onClose, onArrived, destinationTitle, lat, lng }) {
+export default function DriverInAppNavigationModal({
+  visible,
+  onClose,
+  onArrived,
+  arrivalChromeEnabled = true,
+  destinationTitle,
+  lat,
+  lng,
+}) {
   const { navigationController, addListeners, removeListeners } = useNavigation();
   const guidanceStartedRef = useRef(false);
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
   const onArrivedRef = useRef(onArrived);
   onArrivedRef.current = onArrived;
+  const arrivalChromeEnabledRef = useRef(arrivalChromeEnabled);
+  arrivalChromeEnabledRef.current = arrivalChromeEnabled;
   const arrivalFinalizingRef = useRef(false);
   /** Wait for native Navigation map surface before init/session so views can attach (non-zero bounds). */
   const [navMapSurfaceReady, setNavMapSurfaceReady] = useState(false);
@@ -293,15 +303,17 @@ export default function DriverInAppNavigationModal({ visible, onClose, onArrived
         if (cancelled) return;
         guidanceStartedRef.current = true;
 
-        const onArrival = (event) => {
-          if (cancelled) return;
-          if (event?.isFinalDestination === false) return;
-          removeListeners({ onArrival });
-          delete extraListeners.onArrival;
-          void finalizeArrival("sdk");
-        };
-        extraListeners.onArrival = onArrival;
-        addListeners({ onArrival });
+        if (arrivalChromeEnabledRef.current) {
+          const onArrival = (event) => {
+            if (cancelled || !arrivalChromeEnabledRef.current) return;
+            if (event?.isFinalDestination === false) return;
+            removeListeners({ onArrival });
+            delete extraListeners.onArrival;
+            void finalizeArrival("sdk");
+          };
+          extraListeners.onArrival = onArrival;
+          addListeners({ onArrival });
+        }
       } catch (e) {
         detachAllNavigationListeners();
         if (!cancelled) fail(e?.message ? String(e.message) : String(e));
@@ -335,7 +347,7 @@ export default function DriverInAppNavigationModal({ visible, onClose, onArrived
   return (
     <Modal visible animationType="slide" presentationStyle="fullScreen" onRequestClose={() => void handleClose()}>
       <View style={styles.root}>
-        <View style={styles.chrome}>
+        <View style={[styles.chrome, !arrivalChromeEnabled && styles.chromeCloseOnly]}>
           <Pressable
             style={styles.closeBtn}
             onPress={() => void handleClose()}
@@ -344,14 +356,16 @@ export default function DriverInAppNavigationModal({ visible, onClose, onArrived
           >
             <Text style={styles.closeBtnText}>Close</Text>
           </Pressable>
-          <Pressable
-            style={styles.arrivedBtn}
-            onPress={() => void finalizeArrival("manual")}
-            accessibilityRole="button"
-            accessibilityLabel="Mark arrived at destination"
-          >
-            <Text style={styles.arrivedBtnText}>Arrived</Text>
-          </Pressable>
+          {arrivalChromeEnabled ? (
+            <Pressable
+              style={styles.arrivedBtn}
+              onPress={() => void finalizeArrival("manual")}
+              accessibilityRole="button"
+              accessibilityLabel="Mark arrived at destination"
+            >
+              <Text style={styles.arrivedBtnText}>Arrived</Text>
+            </Pressable>
+          ) : null}
         </View>
         <NavigationView
           style={styles.navView}
@@ -367,6 +381,9 @@ export default function DriverInAppNavigationModal({ visible, onClose, onArrived
 
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: "#000" },
+  chromeCloseOnly: {
+    justifyContent: "flex-start",
+  },
   chrome: {
     flexDirection: "row",
     justifyContent: "space-between",

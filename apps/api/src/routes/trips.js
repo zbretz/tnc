@@ -109,6 +109,7 @@ export function createTripsRouter(deps) {
     }
     const prev = trip.status;
     trip.status = "cancelled";
+    trip.driverArrivedAtPickupAt = null;
     trip.etaToPickup = null;
     trip.etaToDropoff = null;
     trip.awaitingRiderCheckoutDeadlineAt = null;
@@ -363,6 +364,7 @@ export function createTripsRouter(deps) {
       }
     }
     trip.status = "in_progress";
+    trip.driverArrivedAtPickupAt = null;
     trip.etaToPickup = null;
     trip.etaToDropoff = null;
     clearPickupEtaThrottle(id);
@@ -536,6 +538,7 @@ export function createTripsRouter(deps) {
     const prev = trip.status;
     trip.status = "awaiting_rider_checkout";
     trip.awaitingRiderCheckoutDeadlineAt = checkoutDeadlineAfterNow();
+    trip.driverArrivedAtPickupAt = null;
     trip.etaToPickup = null;
     trip.etaToDropoff = null;
     clearPickupEtaThrottle(id);
@@ -651,6 +654,29 @@ export function createTripsRouter(deps) {
       return;
     }
     res.json({ trip: result.trip });
+  });
+
+  /** Driver: rider sees "driver has arrived" while status is accepted. */
+  r.post("/:id/driver-arrived-pickup", authMiddleware, requireRole("driver"), async (req, res) => {
+    const id = req.params.id;
+    if (!mongoose.isValidObjectId(id)) {
+      res.status(400).json({ error: "Invalid id" });
+      return;
+    }
+    const trip = await Trip.findById(id).exec();
+    if (!trip || tripDriverIdString(trip) !== req.userId) {
+      res.status(403).json({ error: "Forbidden" });
+      return;
+    }
+    if (trip.status !== "accepted") {
+      res.status(400).json({ error: "Trip must be accepted (en route to pickup)" });
+      return;
+    }
+    trip.driverArrivedAtPickupAt = new Date();
+    await trip.save();
+    const out = await loadTripSerialized(id);
+    deps.onTripUpdated(out);
+    res.json({ trip: out });
   });
 
   r.patch("/:id/driver-location", authMiddleware, requireRole("driver"), async (req, res) => {

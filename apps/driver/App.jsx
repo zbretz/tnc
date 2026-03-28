@@ -1,10 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  ActionSheetIOS,
   ActivityIndicator,
   Alert,
   FlatList,
-  Linking,
   Modal,
   Platform,
   Pressable,
@@ -142,50 +140,6 @@ function compactAddress(value) {
   return out.split(",")[0].trim();
 }
 
-/** Android: `geo:` shows the system “Open with” maps chooser. iOS: no OS chooser — ActionSheet for Apple vs Google. */
-function openMapsNavigation(lat, lng, label) {
-  const la = Number(lat);
-  const lo = Number(lng);
-  if (!Number.isFinite(la) || !Number.isFinite(lo)) {
-    Alert.alert("Navigation", "Invalid coordinates.");
-    return;
-  }
-  const title = typeof label === "string" && label.trim() ? label.trim() : "Destination";
-
-  const fail = () => Alert.alert("Navigation", "Could not open a maps app.");
-
-  if (Platform.OS === "android") {
-    const geo = `geo:0,0?q=${la},${lo}(${encodeURIComponent(title)})`;
-    Linking.openURL(geo).catch(fail);
-    return;
-  }
-
-  if (Platform.OS === "ios" && ActionSheetIOS?.showActionSheetWithOptions) {
-    const apple = `http://maps.apple.com/?daddr=${la},${lo}&dirflg=d`;
-    const googleApp = `comgooglemaps://?daddr=${la},${lo}&directionsmode=driving`;
-    const googleWeb = `https://www.google.com/maps/dir/?api=1&destination=${la},${lo}`;
-
-    ActionSheetIOS.showActionSheetWithOptions(
-      {
-        options: ["Cancel", "Apple Maps", "Google Maps"],
-        cancelButtonIndex: 0,
-      },
-      (buttonIndex) => {
-        if (buttonIndex === 1) {
-          Linking.openURL(apple).catch(fail);
-        } else if (buttonIndex === 2) {
-          Linking.canOpenURL(googleApp)
-            .then((ok) => Linking.openURL(ok ? googleApp : googleWeb))
-            .catch(() => Linking.openURL(googleWeb).catch(fail));
-        }
-      }
-    );
-    return;
-  }
-
-  Linking.openURL(`https://www.google.com/maps/dir/?api=1&destination=${la},${lo}`).catch(fail);
-}
-
 function parseTripIsoDate(iso) {
   if (iso == null || iso === "") return null;
   const d = new Date(iso);
@@ -303,6 +257,19 @@ export default function App() {
   const [requestRelativeTick, setRequestRelativeTick] = useState(0);
   /** Native: Google Navigation SDK full-screen guidance; `key` forces a fresh session when reopening. */
   const [inAppNavTarget, setInAppNavTarget] = useState(null);
+  const inAppNavTargetRef = useRef(null);
+  inAppNavTargetRef.current = inAppNavTarget;
+  const [arrivedPickupBusy, setArrivedPickupBusy] = useState(false);
+
+  useEffect(() => {
+    setInAppNavTarget((prev) => {
+      if (!prev || prev.leg !== "pickup") return prev;
+      if (!activeTrip?._id || String(activeTrip._id) !== String(prev.tripId)) return prev;
+      if (!activeTrip.driverArrivedAtPickupAt) return prev;
+      if (prev.showArrivalChrome === false && !prev.signalPickupArrivalOnArrived) return prev;
+      return { ...prev, showArrivalChrome: false, signalPickupArrivalOnArrived: false };
+    });
+  }, [activeTrip?.driverArrivedAtPickupAt, activeTrip?._id]);
   const socketRef = useRef(null);
   const watchRef = useRef(null);
   const mapRef = useRef(null);
@@ -330,22 +297,6 @@ export default function App() {
   }, [me?.lat, me?.lng]);
 
 
-  const openNavigatePickupFor = useCallback(
-    (t) => {
-      if (!t?.pickup) return;
-      openMapsNavigation(t.pickup.lat, t.pickup.lng, pickupLabel(t) || "Pickup");
-    },
-    [pickupLabel]
-  );
-
-  const openNavigateDropoffFor = useCallback(
-    (t) => {
-      if (t?.dropoff?.lat == null || t?.dropoff?.lng == null) return;
-      openMapsNavigation(t.dropoff.lat, t.dropoff.lng, dropoffLabel(t) || "Dropoff");
-    },
-    [dropoffLabel]
-  );
-
   const openInAppNavigatePickupFor = useCallback(
     async (t) => {
       if (!t?.pickup) return;
@@ -363,7 +314,17 @@ export default function App() {
         );
         return;
       }
-      setInAppNavTarget({ lat: la, lng: lo, title: pickupLabel(t) || "Pickup", key: Date.now() });
+      const pickupArrivalPending = t?.status === "accepted" && !t?.driverArrivedAtPickupAt;
+      setInAppNavTarget({
+        lat: la,
+        lng: lo,
+        title: pickupLabel(t) || "Pickup",
+        key: Date.now(),
+        tripId: t?._id != null ? String(t._id) : null,
+        leg: "pickup",
+        signalPickupArrivalOnArrived: pickupArrivalPending,
+        showArrivalChrome: t?.status !== "accepted" || !t?.driverArrivedAtPickupAt,
+      });
     },
     [pickupLabel]
   );
@@ -385,12 +346,48 @@ export default function App() {
         );
         return;
       }
-      setInAppNavTarget({ lat: la, lng: lo, title: dropoffLabel(t) || "Dropoff", key: Date.now() });
+      setInAppNavTarget({
+        lat: la,
+        lng: lo,
+        title: dropoffLabel(t) || "Dropoff",
+        key: Date.now(),
+        tripId: t?._id != null ? String(t._id) : null,
+        leg: "dropoff",
+        signalPickupArrivalOnArrived: false,
+        showArrivalChrome: true,
+      });
     },
     [dropoffLabel]
   );
 
   const closeInAppNav = useCallback(() => setInAppNavTarget(null), []);
+
+  const postDriverArrivedAtPickup = useCallback(async (tripId) => {
+    if (!token || !tripId) return;
+    setArrivedPickupBusy(true);
+    try {
+      const data = await api(`/trips/${tripId}/driver-arrived-pickup`, { method: "POST", token });
+      const next = data?.trip;
+      if (next) {
+        setActiveTrip((prev) => {
+          if (!prev || String(prev._id) !== String(tripId)) return prev;
+          const merged = { ...prev, ...next };
+          if (prev.driverProfile && !next.driverProfile) merged.driverProfile = prev.driverProfile;
+          return merged;
+        });
+      }
+    } catch (e) {
+      Alert.alert("Could not notify rider", e?.message ? String(e.message) : String(e));
+    } finally {
+      setArrivedPickupBusy(false);
+    }
+  }, [token]);
+
+  const handleInAppNavArrived = useCallback(() => {
+    const nav = inAppNavTargetRef.current;
+    if (!nav?.signalPickupArrivalOnArrived || !nav.tripId) return;
+    void postDriverArrivedAtPickup(nav.tripId);
+  }, [postDriverArrivedAtPickup]);
 
   const loadAvailable = useCallback(async (t) => {
     try {
@@ -834,15 +831,26 @@ export default function App() {
     setBusy(true);
     try {
       const { trip } = await api(`/trips/${idStr}/start-ride`, { method: "POST", token });
-      setActiveTrip((prev) => {
-        if (!prev || String(prev._id) !== String(trip._id)) return trip;
-        const merged = { ...prev, ...trip };
-        if (prev.dropoff?.lat != null && (trip.dropoff == null || trip.dropoff?.lat == null)) {
-          merged.dropoff = prev.dropoff;
-        }
-        if (prev.driverProfile && !trip.driverProfile) merged.driverProfile = prev.driverProfile;
-        return merged;
-      });
+      if (!trip || typeof trip !== "object") {
+        Alert.alert("Start ride", "Server did not return trip data.");
+        return;
+      }
+      const prev = activeTrip;
+      const merged =
+        prev && String(prev._id) === String(trip._id)
+          ? (() => {
+              const m = { ...prev, ...trip };
+              if (prev.dropoff?.lat != null && (trip.dropoff == null || trip.dropoff?.lat == null)) {
+                m.dropoff = prev.dropoff;
+              }
+              if (prev.driverProfile && !trip.driverProfile) m.driverProfile = prev.driverProfile;
+              return m;
+            })()
+          : trip;
+      setActiveTrip(merged);
+      if (Platform.OS !== "web") {
+        await openInAppNavigateDropoffFor(merged);
+      }
     } catch (e) {
       Alert.alert("Start ride", String(e));
     } finally {
@@ -997,6 +1005,8 @@ export default function App() {
       key={inAppNavTarget?.key ?? "nav-closed"}
       visible={inAppNavTarget != null}
       onClose={closeInAppNav}
+      onArrived={handleInAppNavArrived}
+      arrivalChromeEnabled={inAppNavTarget?.showArrivalChrome !== false}
       destinationTitle={inAppNavTarget?.title}
       lat={inAppNavTarget?.lat}
       lng={inAppNavTarget?.lng}
@@ -1145,26 +1155,16 @@ export default function App() {
                   : ""}
           </Text>
           <View style={styles.row}>
-            {!enRouteDropoff ? (
-              <Pressable style={styles.smallBtn} onPress={() => openNavigatePickupFor(activeTrip)}>
-                <Text style={styles.smallBtnText}>Nav: pickup</Text>
-              </Pressable>
-            ) : null}
-            {enRouteDropoff && hasDrop ? (
-              <Pressable style={styles.smallBtn} onPress={() => openNavigateDropoffFor(activeTrip)}>
-                <Text style={styles.smallBtnText}>Nav: dropoff</Text>
-              </Pressable>
-            ) : null}
             {Platform.OS !== "web" ? (
               <>
                 {!enRouteDropoff ? (
                   <Pressable style={styles.smallBtn} onPress={() => void openInAppNavigatePickupFor(activeTrip)}>
-                    <Text style={styles.smallBtnText}>In-app: pickup</Text>
+                    <Text style={styles.smallBtnText}>Navigate: pickup</Text>
                   </Pressable>
                 ) : null}
                 {enRouteDropoff && hasDrop ? (
                   <Pressable style={styles.smallBtn} onPress={() => void openInAppNavigateDropoffFor(activeTrip)}>
-                    <Text style={styles.smallBtnText}>In-app: dropoff</Text>
+                    <Text style={styles.smallBtnText}>Navigate: dropoff</Text>
                   </Pressable>
                 ) : null}
               </>
@@ -1172,22 +1172,32 @@ export default function App() {
           </View>
           {activeTrip.status === "accepted" ? (
             <View style={styles.row}>
-              <Pressable style={[styles.smallBtn, styles.acceptSmall]} onPress={startRide} disabled={busy}>
-                <Text style={styles.smallBtnTextLight}>{busy ? "Working…" : "Picked up rider"}</Text>
-              </Pressable>
+              {!activeTrip.driverArrivedAtPickupAt ? (
+                <Pressable
+                  style={[styles.smallBtn, styles.arrivedPickupBtn]}
+                  onPress={() => void postDriverArrivedAtPickup(String(activeTrip._id))}
+                  disabled={busy || arrivedPickupBusy}
+                >
+                  <Text style={styles.smallBtnTextLight}>
+                    {arrivedPickupBusy ? "Sending…" : "Arrived"}
+                  </Text>
+                </Pressable>
+              ) : (
+                <Pressable style={[styles.smallBtn, styles.acceptSmall]} onPress={startRide} disabled={busy}>
+                  <Text style={styles.smallBtnTextLight}>{busy ? "Working…" : "Start trip"}</Text>
+                </Pressable>
+              )}
             </View>
           ) : null}
           <View style={styles.row}>
             <Pressable style={[styles.smallBtn, styles.warn]} onPress={cancelTrip} disabled={busy}>
               <Text style={styles.smallBtnTextLight}>Clear ride</Text>
             </Pressable>
-            <Pressable
-              style={[styles.smallBtn, styles.danger]}
-              onPress={completeTrip}
-              disabled={busy || activeTrip.status === "awaiting_rider_checkout"}
-            >
-              <Text style={styles.smallBtnTextLight}>Complete trip</Text>
-            </Pressable>
+            {activeTrip.status === "in_progress" ? (
+              <Pressable style={[styles.smallBtn, styles.danger]} onPress={completeTrip} disabled={busy}>
+                <Text style={styles.smallBtnTextLight}>Complete trip</Text>
+              </Pressable>
+            ) : null}
             <Pressable style={styles.smallBtn} onPress={logout}>
               <Text style={styles.smallBtnText}>Log out</Text>
             </Pressable>
@@ -1270,22 +1280,14 @@ export default function App() {
             {previewTrip.riderPhone ? `\nRider phone: ${previewTrip.riderPhone}` : ""}
           </Text>
           <View style={styles.row}>
-            <Pressable style={styles.smallBtn} onPress={() => openNavigatePickupFor(previewTrip)}>
-              <Text style={styles.smallBtnText}>Nav: pickup</Text>
-            </Pressable>
-            {previewTrip.dropoff?.lat != null && previewTrip.dropoff?.lng != null ? (
-              <Pressable style={styles.smallBtn} onPress={() => openNavigateDropoffFor(previewTrip)}>
-                <Text style={styles.smallBtnText}>Nav: dropoff</Text>
-              </Pressable>
-            ) : null}
             {Platform.OS !== "web" ? (
               <>
                 <Pressable style={styles.smallBtn} onPress={() => void openInAppNavigatePickupFor(previewTrip)}>
-                  <Text style={styles.smallBtnText}>In-app: pickup</Text>
+                  <Text style={styles.smallBtnText}>Navigate: pickup</Text>
                 </Pressable>
                 {previewTrip.dropoff?.lat != null && previewTrip.dropoff?.lng != null ? (
                   <Pressable style={styles.smallBtn} onPress={() => void openInAppNavigateDropoffFor(previewTrip)}>
-                    <Text style={styles.smallBtnText}>In-app: dropoff</Text>
+                    <Text style={styles.smallBtnText}>Navigate: dropoff</Text>
                   </Pressable>
                 ) : null}
               </>
@@ -1850,6 +1852,7 @@ const styles = StyleSheet.create({
   warn: { backgroundColor: "#f59e0b" },
   danger: { backgroundColor: "#dc2626" },
   acceptSmall: { backgroundColor: "#059669" },
+  arrivedPickupBtn: { backgroundColor: "#15803d" },
   smallBtnText: { ...pj.sb, color: "#0f172a" },
   smallBtnTextLight: { ...pj.sb, color: "#fff" },
 });

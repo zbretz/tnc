@@ -1180,9 +1180,13 @@ export default function App() {
   }, [checkoutFareUsd]);
 
   const inTripTipModalHint = useMemo(() => {
-    if (!Number.isFinite(checkoutFareUsd)) return "Fixed amounts.";
-    if (checkoutFareUsd < RIDER_CHECKOUT_TIP_FARE_THRESHOLD_USD) return "Fixed dollar amounts.";
-    return "10%, 15%, or 20% of quoted fare.";
+    if (!Number.isFinite(checkoutFareUsd)) {
+      return "Suggestions below; tap “Other amount” if you prefer something different.";
+    }
+    if (checkoutFareUsd < RIDER_CHECKOUT_TIP_FARE_THRESHOLD_USD) {
+      return "Suggestions use round dollar amounts for shorter trips.";
+    }
+    return "Suggestions are 10%, 15%, and 20% of your quoted fare.";
   }, [checkoutFareUsd]);
 
   const finalizeTripCheckout = useCallback(async () => {
@@ -1289,7 +1293,7 @@ export default function App() {
       } else {
         const p = parseTipDollarInputToCents(inTripCustomTipText, checkoutMaxTipCents);
         if (p === null) {
-          Alert.alert("Tip", "Enter a valid dollar amount, or pick a suggestion.");
+          Alert.alert("Driver tip", "Enter a valid dollar amount, or pick a suggestion.");
           return;
         }
         void submitInTripTip(p);
@@ -2135,6 +2139,11 @@ export default function App() {
       return;
     }
     setBusy(true);
+    if (addressBlurTimerRef.current) {
+      clearTimeout(addressBlurTimerRef.current);
+      addressBlurTimerRef.current = null;
+    }
+    Keyboard.dismiss();
     let clearBusyInFinally = true;
     try {
       const payCfg = await api("/payments/config", { token });
@@ -2182,6 +2191,10 @@ export default function App() {
         if (__DEV__) console.warn("[tnc rider] requestRide: InteractionManager callback");
         requestAnimationFrame(() => {
           if (__DEV__) console.warn("[tnc rider] requestRide: calling setTrip now");
+          if (addressBlurTimerRef.current) {
+            clearTimeout(addressBlurTimerRef.current);
+            addressBlurTimerRef.current = null;
+          }
           const carryForwardRoute =
             planRouteCoords?.length >= 2
               ? planRouteCoords
@@ -2586,12 +2599,13 @@ export default function App() {
       setPlanAddressFieldFocused(false);
       setAddressPredictions([]);
       addressBlurTimerRef.current = null;
-      if (USE_NATIVE_PLANNING_BOTTOM_SHEET && !trip) {
+      /** Use tripIdRef — stale `trip` here would still be null after Book ride, and snapToIndex on the trip dock crashes Gorhom. */
+      if (USE_NATIVE_PLANNING_BOTTOM_SHEET && tripIdRef.current == null) {
         setPlanningSheetIndex(0);
         planningSheetRef.current?.snapToIndex(clampPlanningSnapIndex(0));
       }
     }, 220);
-  }, [trip]);
+  }, []);
 
   const applyPlacePrediction = useCallback(
     async (pred, isPickup) => {
@@ -3105,7 +3119,7 @@ export default function App() {
         ? Math.round(Number(trip.riderTipAmountCents))
         : 0;
     const tipDisabled = busy || checkoutFinalizing || inTripTipBusy;
-    const valueLabel = committed === 0 ? "None" : `$${(committed / 100).toFixed(2)}`;
+    const valueLabel = committed === 0 ? "At trip end" : `$${(committed / 100).toFixed(2)}`;
 
     return (
       <View style={styles.inTripTipSection}>
@@ -3114,9 +3128,9 @@ export default function App() {
           onPress={() => setInTripTipModalOpen(true)}
           disabled={tipDisabled}
           accessibilityRole="button"
-          accessibilityLabel={`Tip, ${valueLabel}`}
+          accessibilityLabel={`Driver tip, ${committed === 0 ? "decide at trip end or set now" : valueLabel}`}
         >
-          <Text style={styles.inTripTipRowLabel}>Tip</Text>
+          <Text style={styles.inTripTipRowLabel}>Driver tip</Text>
           <Text style={styles.inTripTipRowValue} numberOfLines={1}>
             {valueLabel}
           </Text>
@@ -3314,7 +3328,7 @@ export default function App() {
               {checkoutTipCustom ? (
                 <>
                   <View style={styles.checkoutCustomTipBlock}>
-                    <Text style={styles.checkoutCustomTipLabel}>Custom amount (USD)</Text>
+                    <Text style={styles.checkoutCustomTipLabel}>Custom (USD)</Text>
                     <TextInput
                       style={styles.checkoutCustomTipInput}
                       value={checkoutCustomTipText}
@@ -3458,12 +3472,17 @@ export default function App() {
               bounces={false}
               contentContainerStyle={styles.checkoutModalScrollContent}
             >
-              <Text style={[styles.checkoutModalTitle, styles.inTripTipModalTitle]}>Tip</Text>
-              <Text style={styles.inTripTipModalSubtitle}>With fare when the trip ends.</Text>
+              <Text style={[styles.checkoutModalTitle, styles.inTripTipModalTitle]}>Driver tip</Text>
+              <Text style={styles.inTripTipModalSubtitle}>
+                Set a tip now so you’re less likely to forget — it’s only charged when the trip ends, and you can
+                change it anytime before you pay.
+                {"\n\n"}
+                Or skip for now and choose your tip when the ride is over.
+              </Text>
               <Text style={[styles.checkoutTipModeHint, styles.inTripTipModalHint]}>{inTripTipModalHint}</Text>
               {inTripTipCustom ? (
                 <View style={styles.checkoutCustomTipBlock}>
-                  <Text style={styles.checkoutCustomTipLabel}>Custom (USD)</Text>
+                  <Text style={styles.checkoutCustomTipLabel}>Custom amount (USD)</Text>
                   <TextInput
                     style={styles.checkoutCustomTipInput}
                     value={inTripCustomTipText}
@@ -3526,7 +3545,7 @@ export default function App() {
                       inTripTipCustom && styles.checkoutTipChipTextSelected,
                     ]}
                   >
-                    Custom
+                    Other amount
                   </Text>
                 </Pressable>
               </View>
@@ -3920,6 +3939,16 @@ export default function App() {
                   {...(Platform.OS === "android" ? { overScrollMode: "never" } : {})}
                 >
                   <>
+                    {trip.status === "accepted" && trip.driverArrivedAtPickupAt ? (
+                      <View
+                        style={styles.driverArrivedPill}
+                        accessibilityRole="text"
+                        accessibilityLabel="Your driver has arrived at the pickup location"
+                      >
+                        <Ionicons name="checkmark-circle" size={22} color="#fff" />
+                        <Text style={styles.driverArrivedPillText}>Your driver has arrived</Text>
+                      </View>
+                    ) : null}
                     <Text style={styles.banner}>
                       {trip.status === "requested"
                         ? "Your request is live. You can still cancel below before a driver accepts."
@@ -4449,6 +4478,16 @@ export default function App() {
               keyboardShouldPersistTaps="always"
             >
               <>
+                {trip.status === "accepted" && trip.driverArrivedAtPickupAt ? (
+                  <View
+                    style={styles.driverArrivedPill}
+                    accessibilityRole="text"
+                    accessibilityLabel="Your driver has arrived at the pickup location"
+                  >
+                    <Ionicons name="checkmark-circle" size={22} color="#fff" />
+                    <Text style={styles.driverArrivedPillText}>Your driver has arrived</Text>
+                  </View>
+                ) : null}
                 <Text style={styles.banner}>
                   {trip.status === "requested"
                     ? "Your request is live. You can still cancel below if plans change."
@@ -5156,6 +5195,22 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "#bfdbfe",
     color: "#1e3a8a",
+  },
+  driverArrivedPill: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    backgroundColor: "#15803d",
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+    borderRadius: 12,
+    marginBottom: 10,
+  },
+  driverArrivedPillText: {
+    flex: 1,
+    fontSize: 16,
+    ...pj.sb,
+    color: "#fff",
   },
   driverCard: {
     flexDirection: "row",
