@@ -185,12 +185,48 @@ function openMapsNavigation(lat, lng, label) {
   Linking.openURL(`https://www.google.com/maps/dir/?api=1&destination=${la},${lo}`).catch(fail);
 }
 
-function preferredPickupLabel(trip) {
-  const raw = trip?.preferredPickupAt;
-  if (!raw) return "Pickup now";
-  const d = new Date(raw);
-  if (!Number.isFinite(d.getTime())) return "Pickup now";
-  return `Preferred pickup: ${d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`;
+function parseTripIsoDate(iso) {
+  if (iso == null || iso === "") return null;
+  const d = new Date(iso);
+  return Number.isFinite(d.getTime()) ? d : null;
+}
+
+/**
+ * How long ago the trip was requested (`createdAt`), e.g. "Requested 5 minutes ago".
+ * @param {number} [nowMs] — for tests; defaults to `Date.now()`.
+ */
+function tripRequestMadeLabel(trip, nowMs = Date.now()) {
+  const d = parseTripIsoDate(trip?.createdAt);
+  if (!d) return null;
+  const elapsedSec = Math.floor((nowMs - d.getTime()) / 1000);
+  if (elapsedSec < 0) return "Requested just now";
+  if (elapsedSec < 45) return "Requested just now";
+  if (elapsedSec < 90) return "Requested 1 minute ago";
+  const minutes = Math.floor(elapsedSec / 60);
+  if (minutes < 60) {
+    return `Requested ${minutes} minute${minutes === 1 ? "" : "s"} ago`;
+  }
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) {
+    return `Requested ${hours} hour${hours === 1 ? "" : "s"} ago`;
+  }
+  const days = Math.floor(hours / 24);
+  if (days < 7) {
+    return `Requested ${days} day${days === 1 ? "" : "s"} ago`;
+  }
+  return `Requested ${d.toLocaleDateString(undefined, { month: "short", day: "numeric" })}`;
+}
+
+/** Rider-scheduled pickup window; null if ASAP / not set. */
+function tripPickupByLabel(trip) {
+  const d = parseTripIsoDate(trip?.preferredPickupAt);
+  if (!d) return null;
+  const created = parseTripIsoDate(trip?.createdAt);
+  const sameCalendarDay = created && created.toDateString() === d.toDateString();
+  const opts = sameCalendarDay
+    ? { hour: "numeric", minute: "2-digit" }
+    : { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" };
+  return `Pickup by ${d.toLocaleString(undefined, opts)}`;
 }
 
 async function fetchDrivingPreviewCoords(token, from, to) {
@@ -262,6 +298,8 @@ export default function App() {
   const [activeDrivingCoords, setActiveDrivingCoords] = useState(null);
   const [previewDrivingCoords, setPreviewDrivingCoords] = useState(null);
   const [mapStyleId, setMapStyleId] = useState("default");
+  /** Bumps on an interval so open-request cards re-render and refresh relative "Requested … ago" text. */
+  const [requestRelativeTick, setRequestRelativeTick] = useState(0);
   const socketRef = useRef(null);
   const watchRef = useRef(null);
   const mapRef = useRef(null);
@@ -334,6 +372,11 @@ export default function App() {
     if (token) refreshSessionUser(token);
     else setSessionUser(null);
   }, [token, refreshSessionUser]);
+
+  useEffect(() => {
+    const id = setInterval(() => setRequestRelativeTick((n) => n + 1), 30000);
+    return () => clearInterval(id);
+  }, []);
 
   useEffect(() => {
     if (!token || !sessionUser?.isAdmin) {
@@ -1142,7 +1185,8 @@ export default function App() {
             Trip preview. Green P pin = pickup, purple D pin = dropoff.
             {`\nPickup: ${pickupLabel(previewTrip)}`}
             {dropoffLabel(previewTrip) ? `\nDropoff: ${dropoffLabel(previewTrip)}` : "\nNo dropoff set on this request."}
-            {`\n${preferredPickupLabel(previewTrip)}`}
+            {`\n${tripRequestMadeLabel(previewTrip) || "Requested —"}`}
+            {tripPickupByLabel(previewTrip) ? `\n${tripPickupByLabel(previewTrip)}` : "\nPickup: Now"}
             {previewTrip.fareEstimate?.total != null
               ? `\nEst. fare: $${Number(previewTrip.fareEstimate.total).toFixed(2)}`
               : ""}
@@ -1377,6 +1421,7 @@ export default function App() {
       </Pressable>
       <FlatList
         data={available}
+        extraData={requestRelativeTick}
         keyExtractor={(item, index) =>
           item?._id != null && String(item._id).length > 0 ? String(item._id) : `trip-${index}`
         }
@@ -1393,7 +1438,12 @@ export default function App() {
               Pickup: {pickupLabel(item)}
             </Text>
             <Text style={styles.cardMeta}>Dropoff: {dropoffLabel(item) || "Not set"}</Text>
-            <Text style={styles.cardMeta}>{preferredPickupLabel(item)}</Text>
+            {tripRequestMadeLabel(item) ? (
+              <Text style={styles.cardMeta}>{tripRequestMadeLabel(item)}</Text>
+            ) : null}
+            {tripPickupByLabel(item) ? (
+              <Text style={[styles.cardMeta, styles.cardPickupBy]}>{tripPickupByLabel(item)}</Text>
+            ) : null}
             {item.fareEstimate?.total != null ? (
               <Text style={styles.cardMeta}>
                 Est. fare: ${Number(item.fareEstimate.total).toFixed(2)}
@@ -1624,6 +1674,7 @@ const styles = StyleSheet.create({
   },
   cardTitle: { fontSize: 16, ...pj.b },
   cardMeta: { color: "#64748b", marginTop: 4, marginBottom: 4, fontSize: 14, ...pj.r },
+  cardPickupBy: { ...pj.m, color: "#1d4ed8" },
   cardPhone: { fontSize: 14, ...pj.sb, color: "#0f172a", marginBottom: 12 },
   cardRow: { flexDirection: "row", gap: 8 },
   previewBtn: {
