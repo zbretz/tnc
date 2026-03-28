@@ -83,6 +83,27 @@ const tripSchema = new mongoose.Schema(
     deadheadRoute: { type: routedSegmentSchema, default: null },
     /** Routed driving path: pickup pin → dropoff pin (snapshot at in_progress). */
     rideRoute: { type: routedSegmentSchema, default: null },
+
+    /** Set when the driver completes the trip (Stripe off-session charge when configured). */
+    fareChargeStatus: {
+      type: String,
+      enum: [
+        "none",
+        "waived",
+        "succeeded",
+        "failed",
+        "requires_action",
+        "skipped_stripe_disabled",
+        "skipped_no_estimate",
+        "skipped_no_payment_method",
+        "skipped_below_minimum",
+      ],
+      default: "none",
+    },
+    fareChargeAmountCents: { type: Number, default: null },
+    fareChargeCurrency: { type: String, default: "" },
+    stripePaymentIntentId: { type: String, default: "" },
+    fareChargeError: { type: String, default: "" },
   },
   { timestamps: true }
 );

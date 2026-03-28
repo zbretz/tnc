@@ -11,6 +11,8 @@ import { computeFareEstimate } from "../fareEstimate.js";
 import { fetchDrivingRouteSummary } from "../googleDirections.js";
 import { directionsApiKey } from "../lib/mapsKeys.js";
 import { recordTripStatusEvent } from "../lib/tripEvents.js";
+import { applyFareChargeToTrip } from "../lib/chargeTripFare.js";
+import { getStripe, stripeEnabled } from "../lib/stripe.js";
 
 const POPULATE_DRIVER = { path: "driver", select: "-passwordHash" };
 
@@ -380,7 +382,19 @@ export function createTripsRouter(deps) {
       res.status(400).json({ error: "Trip not active" });
       return;
     }
+    const rider = await User.findById(trip.rider).exec();
+    if (!rider) {
+      res.status(500).json({ error: "Rider not found" });
+      return;
+    }
     const prev = trip.status;
+    try {
+      await applyFareChargeToTrip(trip, rider);
+    } catch (e) {
+      console.error("[tnc] fare charge on trip complete", e);
+      trip.fareChargeStatus = "failed";
+      trip.fareChargeError = e?.raw?.message || e?.message || "charge_error";
+    }
     trip.status = "completed";
     trip.etaToPickup = null;
     trip.etaToDropoff = null;
@@ -398,6 +412,40 @@ export function createTripsRouter(deps) {
     const out = await loadTripSerialized(id);
     deps.onTripUpdated(out);
     res.json({ trip: out });
+  });
+
+  /** Rider: client secret to complete 3DS when off-session charge returned `requires_action`. */
+  r.get("/:id/payment-client-secret", authMiddleware, requireRole("rider"), async (req, res) => {
+    const id = req.params.id;
+    if (!mongoose.isValidObjectId(id)) {
+      res.status(400).json({ error: "Invalid id" });
+      return;
+    }
+    const trip = await Trip.findById(id).select("rider status fareChargeStatus stripePaymentIntentId").exec();
+    if (!trip || String(trip.rider) !== String(req.userId)) {
+      res.status(403).json({ error: "Forbidden" });
+      return;
+    }
+    if (trip.status !== "completed" || trip.fareChargeStatus !== "requires_action" || !trip.stripePaymentIntentId) {
+      res.status(400).json({ error: "No pending payment confirmation for this trip" });
+      return;
+    }
+    if (!stripeEnabled()) {
+      res.status(503).json({ error: "Payments not configured" });
+      return;
+    }
+    try {
+      const stripe = getStripe();
+      const pi = await stripe.paymentIntents.retrieve(trip.stripePaymentIntentId);
+      if (pi.status !== "requires_action" && pi.status !== "requires_confirmation") {
+        res.status(400).json({ error: "Payment no longer requires action" });
+        return;
+      }
+      res.json({ clientSecret: pi.client_secret });
+    } catch (e) {
+      console.error("GET /trips/:id/payment-client-secret", e);
+      res.status(500).json({ error: e?.raw?.message || e?.message || "Server error" });
+    }
   });
 
   r.patch("/:id/driver-location", authMiddleware, requireRole("driver"), async (req, res) => {

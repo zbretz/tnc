@@ -194,6 +194,17 @@ export function serializeTrip(t, options = {}) {
           },
         }
       : {}),
+    ...(t.fareChargeStatus && t.fareChargeStatus !== "none"
+      ? {
+          fareCharge: {
+            status: t.fareChargeStatus,
+            ...(t.fareChargeAmountCents != null ? { amountCents: t.fareChargeAmountCents } : {}),
+            ...(t.fareChargeCurrency ? { currency: t.fareChargeCurrency } : {}),
+            ...(t.fareChargeError ? { error: t.fareChargeError } : {}),
+            ...(t.fareChargeStatus === "requires_action" ? { requiresAction: true } : {}),
+          },
+        }
+      : {}),
     createdAt: t.createdAt.toISOString(),
     updatedAt: t.updatedAt.toISOString(),
   };
