@@ -61,10 +61,23 @@ const PLANNING_SNAP_HEIGHT_FRACTIONS = PLANNING_SNAP_POINTS.map((s) => {
   const n = parseFloat(String(s).replace("%", ""), 10);
   return Number.isFinite(n) ? n / 100 : 0.34;
 });
-/** Native trip summary dock max height vs screen (see `tripBottomDock`). */
-const TRIP_BOTTOM_DOCK_MAX_FRACTION = 0.44;
-/** Same fraction as snap — keep trip UI inside Gorhom sheet so the sheet never unmounts (avoids iOS native crash). */
-const TRIP_NATIVE_SHEET_SNAP = `${Math.round(TRIP_BOTTOM_DOCK_MAX_FRACTION * 100)}%`;
+/** Native trip sheet: pending request — shorter dock. */
+const TRIP_SHEET_SNAP_COMPACT_FRAC = 0.44;
+/** Native trip sheet: driver assigned / ride active / checkout — extra height so tip + summary fit without scrolling. */
+const TRIP_SHEET_SNAP_ROOMY_FRAC = 0.58;
+/** Legacy alias (compact); map FAB uses dynamic fraction when `trip` is set. */
+const TRIP_BOTTOM_DOCK_MAX_FRACTION = TRIP_SHEET_SNAP_COMPACT_FRAC;
+/** Default snap string when trip snap is computed per-status. */
+const TRIP_NATIVE_SHEET_SNAP = `${Math.round(TRIP_SHEET_SNAP_COMPACT_FRAC * 100)}%`;
+
+function tripNativeSheetHeightFraction(t) {
+  if (!t) return TRIP_SHEET_SNAP_COMPACT_FRAC;
+  const st = t.status || "";
+  if (st === "accepted" || st === "in_progress" || st === "awaiting_rider_checkout") {
+    return TRIP_SHEET_SNAP_ROOMY_FRAC;
+  }
+  return TRIP_SHEET_SNAP_COMPACT_FRAC;
+}
 /** Space between locate FAB bottom edge and top edge of bottom sheet / dock. */
 const MAP_LOCATE_FAB_SHEET_GAP = 10;
 /** Deferred ms before clearing trip state — same path for accepted vs in_progress so complete/cancel never diverge on native teardown. */
@@ -2096,13 +2109,15 @@ export default function App() {
   /** Always length 3 — gorhom is unstable when snap count changes; trip mode reuses the same BottomSheet instance. */
   const nativePlanningSheetSnapPoints = useMemo(() => {
     if (trip) {
-      return [TRIP_NATIVE_SHEET_SNAP, TRIP_NATIVE_SHEET_SNAP, TRIP_NATIVE_SHEET_SNAP];
+      const frac = tripNativeSheetHeightFraction(trip);
+      const s = `${Math.round(frac * 100)}%`;
+      return [s, s, s];
     }
     if (planningDropoffConfirmed) {
       return [PLANNING_BOOK_RIDE_SNAP, PLANNING_BOOK_RIDE_SNAP, PLANNING_BOOK_RIDE_SNAP];
     }
     return PLANNING_SNAP_POINTS;
-  }, [trip, planningDropoffConfirmed]);
+  }, [trip, trip?.status, planningDropoffConfirmed]);
   planningSnapPointsRef.current = nativePlanningSheetSnapPoints;
 
   const planningDropoffHasBothCoords =
@@ -2655,9 +2670,18 @@ export default function App() {
   /** Keep the sheet above the keyboard on iOS until the keyboard fully dismisses (avoids a gap on blur). */
   const iosKeyboardSheetMargin = keyboardInset > 0 && !trip && Platform.OS === "ios";
 
+  const webTripSummaryRoomy =
+    !USE_NATIVE_PLANNING_BOTTOM_SHEET &&
+    trip &&
+    ["accepted", "in_progress", "awaiting_rider_checkout"].includes(trip.status);
+
   const mapWrapperStyle = USE_NATIVE_PLANNING_BOTTOM_SHEET
     ? styles.mapLayer
-    : [styles.mapArea, !trip && addressSheetKeyboardLift ? styles.mapAreaWhenKeyboard : null].filter(Boolean);
+    : [
+        styles.mapArea,
+        webTripSummaryRoomy ? styles.mapAreaWhenTripSummaryRoomy : null,
+        !trip && addressSheetKeyboardLift ? styles.mapAreaWhenKeyboard : null,
+      ].filter(Boolean);
 
   /** Sit the locate control just above the planning bottom sheet (native) or above the web panel (fixed inset). */
   const mapLocateFabBottomStyle = useMemo(() => {
@@ -2669,7 +2693,8 @@ export default function App() {
         return { bottom: SCREEN_HEIGHT * frac + MAP_LOCATE_FAB_SHEET_GAP };
       }
       if (trip) {
-        return { bottom: SCREEN_HEIGHT * TRIP_BOTTOM_DOCK_MAX_FRACTION + MAP_LOCATE_FAB_SHEET_GAP };
+        const frac = tripNativeSheetHeightFraction(trip);
+        return { bottom: SCREEN_HEIGHT * frac + MAP_LOCATE_FAB_SHEET_GAP };
       }
     }
     return { bottom: 14 };
@@ -3629,6 +3654,8 @@ export default function App() {
                         ) : null}
                       </View>
                     ) : null}
+                    {(trip.status === "accepted" || trip.status === "in_progress") &&
+                      renderInProgressTipBlock()}
                     <View style={styles.addrSection}>
                       <Text style={styles.addrText}>Pickup: {trip?.pickupAddress || "Not available"}</Text>
                       <Text style={styles.addrText}>Dropoff: {trip?.dropoffAddress || "Not set"}</Text>
@@ -3656,8 +3683,6 @@ export default function App() {
                         )
                       ) : null}
                     </View>
-                    {(trip.status === "accepted" || trip.status === "in_progress") &&
-                    renderInProgressTipBlock()}
                   </>
                   <View style={styles.row}>
                     {trip && trip.status !== "completed" && trip.status !== "cancelled" ? (
@@ -3888,6 +3913,7 @@ export default function App() {
         <View
           style={[
             styles.bottomPanel,
+            webTripSummaryRoomy ? styles.bottomPanelWebTripRoomy : null,
             addressSheetKeyboardLift && styles.bottomPanelWhenKeyboard,
             iosKeyboardSheetMargin && { marginBottom: keyboardInset },
             !trip && planningDropoffConfirmed ? styles.bottomPanelBookRideWeb : null,
@@ -4154,6 +4180,7 @@ export default function App() {
                     ) : null}
                   </View>
                 ) : null}
+                {(trip.status === "accepted" || trip.status === "in_progress") && renderInProgressTipBlock()}
                 <View style={styles.addrSection}>
                   <Text style={styles.addrText}>Pickup: {trip?.pickupAddress || "Not available"}</Text>
                   <Text style={styles.addrText}>Dropoff: {trip?.dropoffAddress || "Not set"}</Text>
@@ -4181,7 +4208,6 @@ export default function App() {
                     )
                   ) : null}
                 </View>
-                {(trip.status === "accepted" || trip.status === "in_progress") && renderInProgressTipBlock()}
               </>
               <View style={styles.row}>
                 {trip && trip.status !== "completed" && trip.status !== "cancelled" ? (
@@ -4214,6 +4240,8 @@ const styles = StyleSheet.create({
   container: { flex: 1, flexDirection: "column", backgroundColor: "#fff" },
   /** ~75% of vertical space — map must have bounded flex so it renders. */
   mapArea: { flex: 3, overflow: "hidden" },
+  /** Web: more room for trip summary + tip row while map stays visible. */
+  mapAreaWhenTripSummaryRoomy: { flex: 2 },
   /** Shrink map while keyboard is open so the sheet gets more height. */
   mapAreaWhenKeyboard: { flex: 1, minHeight: 100 },
   /** Native planning: map fills space under chrome; gorhom sheet overlays the bottom. */
@@ -4282,13 +4310,13 @@ const styles = StyleSheet.create({
     left: 0,
     right: 0,
     bottom: 0,
-    maxHeight: SCREEN_HEIGHT * 0.44,
+    maxHeight: SCREEN_HEIGHT * TRIP_SHEET_SNAP_ROOMY_FRAC,
     width: "100%",
     backgroundColor: "#ffffff",
     borderTopWidth: StyleSheet.hairlineWidth,
     borderTopColor: "#cbd5e1",
   },
-  tripBottomDockScroll: { maxHeight: SCREEN_HEIGHT * 0.44 },
+  tripBottomDockScroll: { maxHeight: SCREEN_HEIGHT * TRIP_SHEET_SNAP_ROOMY_FRAC },
   /** ~25% — planning sheet and trip summary. */
   bottomPanel: {
     flex: 1,
@@ -4296,6 +4324,12 @@ const styles = StyleSheet.create({
     backgroundColor: "#ffffff",
     borderTopWidth: StyleSheet.hairlineWidth,
     borderTopColor: "#cbd5e1",
+  },
+  /** Web: taller panel when driver is assigned / ride active / checkout (matches native ~58% sheet). */
+  bottomPanelWebTripRoomy: {
+    flex: 1.4,
+    minHeight: Math.round(SCREEN_HEIGHT * 0.5),
+    maxHeight: Math.round(SCREEN_HEIGHT * 0.62),
   },
   /** Web: book ride step matches native sheet height so footer stays on-screen. */
   bottomPanelBookRideWeb: {
