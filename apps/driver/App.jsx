@@ -413,7 +413,7 @@ export default function App() {
       setActiveDrivingCoords(null);
       return;
     }
-    const enRouteDropoff = st === "in_progress";
+    const enRouteDropoff = st === "in_progress" || st === "awaiting_rider_checkout";
     const from = meForRoute;
     const to = enRouteDropoff ? d : p;
     if (!from || !to || (enRouteDropoff && !hasDrop)) {
@@ -536,8 +536,14 @@ export default function App() {
 
     const onTripUpdated = (msg) => {
       if (!msg?.trip || String(msg.trip._id) !== String(tripId)) return;
+      const next = msg.trip;
+      if (next.status === "completed" || next.status === "cancelled") {
+        setActiveTrip(null);
+        setMe(null);
+        loadAvailable(token);
+        return;
+      }
       setActiveTrip((prev) => {
-        const next = msg.trip;
         if (!prev || String(prev._id) !== String(next._id)) {
           return next;
         }
@@ -702,15 +708,24 @@ export default function App() {
 
   const completeTrip = async () => {
     if (!token || !activeTrip) return;
+    if (activeTrip.status === "awaiting_rider_checkout") return;
     setBusy(true);
     try {
-      await api(`/trips/${activeTrip._id}/complete`, {
+      const data = await api(`/trips/${activeTrip._id}/complete`, {
         method: "POST",
         token,
       });
-      setActiveTrip(null);
-      setMe(null);
-      await loadAvailable(token);
+      const t = data?.trip;
+      if (t && t.status === "awaiting_rider_checkout") {
+        setActiveTrip((prev) => {
+          if (!prev || String(prev._id) !== String(t._id)) return t;
+          return { ...prev, ...t };
+        });
+      } else {
+        setActiveTrip(null);
+        setMe(null);
+        await loadAvailable(token);
+      }
     } catch (e) {
       Alert.alert("Complete failed", String(e));
     } finally {
@@ -780,7 +795,7 @@ export default function App() {
     const spanAB = (a, b) =>
       Math.max(Math.abs(a.lat - b.lat), Math.abs(a.lng - b.lng), 0.02) * 1.4;
 
-    if (st === "in_progress") {
+    if (st === "in_progress" || st === "awaiting_rider_checkout") {
       if (d?.lat != null && d?.lng != null && me?.lat != null && me?.lng != null) {
         return {
           latitude: (d.lat + me.lat) / 2,
@@ -851,7 +866,7 @@ export default function App() {
     const st = activeTrip.status || "accepted";
     const coords = [];
 
-    if (st === "in_progress") {
+    if (st === "in_progress" || st === "awaiting_rider_checkout") {
       if (d?.lat != null && d?.lng != null) {
         coords.push({ latitude: d.lat, longitude: d.lng });
       }
@@ -932,7 +947,8 @@ export default function App() {
   }
 
   if (activeTrip) {
-    const enRouteDropoff = activeTrip.status === "in_progress";
+    const enRouteDropoff =
+      activeTrip.status === "in_progress" || activeTrip.status === "awaiting_rider_checkout";
     const hasDrop =
       activeTrip.dropoff?.lat != null &&
       activeTrip.dropoff?.lng != null &&
@@ -1000,21 +1016,28 @@ export default function App() {
         </MapView>
         <View style={styles.overlay}>
           <Text style={styles.banner}>
-            {enRouteDropoff
-              ? "En route to dropoff — map shows you and the destination only. Purple line: remaining leg."
-              : "En route to pickup — map shows you and the rider pickup (dropoff is not used to frame the map). Purple line shows your pickup approach."}
-            {`\nPickup: ${pickupLabel(activeTrip)}`}
-            {dropoffLabel(activeTrip) ? `\nDropoff: ${dropoffLabel(activeTrip)}` : ""}
-            {!enRouteDropoff && activeTrip?.etaToPickup
-              ? `\nETA to pickup: ${activeTrip.etaToPickup.durationText || `~${activeTrip.etaToPickup.summaryMinutes} min`}${activeTrip.etaToPickup.distanceText ? ` · ${activeTrip.etaToPickup.distanceText}` : ""}${activeTrip.etaToPickup.usesTraffic ? " (traffic)" : ""}`
-              : !enRouteDropoff && me
-                ? "\nETA to pickup: updating…"
-                : ""}
-            {enRouteDropoff && activeTrip?.etaToDropoff
-              ? `\nETA to dropoff: ${activeTrip.etaToDropoff.durationText || `~${activeTrip.etaToDropoff.summaryMinutes} min`}${activeTrip.etaToDropoff.distanceText ? ` · ${activeTrip.etaToDropoff.distanceText}` : ""}${activeTrip.etaToDropoff.usesTraffic ? " (traffic)" : ""}`
-              : enRouteDropoff && me
-                ? "\nETA to dropoff: updating…"
-                : ""}
+            {activeTrip.status === "awaiting_rider_checkout"
+              ? `Waiting for rider to confirm tip & payment in their app.\nPickup: ${pickupLabel(activeTrip)}${dropoffLabel(activeTrip) ? `\nDropoff: ${dropoffLabel(activeTrip)}` : ""}`
+              : enRouteDropoff
+                ? "En route to dropoff — map shows you and the destination only. Purple line: remaining leg."
+                : "En route to pickup — map shows you and the rider pickup (dropoff is not used to frame the map). Purple line shows your pickup approach."}
+            {activeTrip.status === "awaiting_rider_checkout"
+              ? ""
+              : `\nPickup: ${pickupLabel(activeTrip)}${dropoffLabel(activeTrip) ? `\nDropoff: ${dropoffLabel(activeTrip)}` : ""}`}
+            {activeTrip.status === "awaiting_rider_checkout"
+              ? ""
+              : !enRouteDropoff && activeTrip?.etaToPickup
+                ? `\nETA to pickup: ${activeTrip.etaToPickup.durationText || `~${activeTrip.etaToPickup.summaryMinutes} min`}${activeTrip.etaToPickup.distanceText ? ` · ${activeTrip.etaToPickup.distanceText}` : ""}${activeTrip.etaToPickup.usesTraffic ? " (traffic)" : ""}`
+                : !enRouteDropoff && me
+                  ? "\nETA to pickup: updating…"
+                  : ""}
+            {activeTrip.status === "awaiting_rider_checkout"
+              ? ""
+              : enRouteDropoff && activeTrip?.etaToDropoff
+                ? `\nETA to dropoff: ${activeTrip.etaToDropoff.durationText || `~${activeTrip.etaToDropoff.summaryMinutes} min`}${activeTrip.etaToDropoff.distanceText ? ` · ${activeTrip.etaToDropoff.distanceText}` : ""}${activeTrip.etaToDropoff.usesTraffic ? " (traffic)" : ""}`
+                : enRouteDropoff && me
+                  ? "\nETA to dropoff: updating…"
+                  : ""}
           </Text>
           <View style={styles.row}>
             {!enRouteDropoff ? (
@@ -1039,7 +1062,11 @@ export default function App() {
             <Pressable style={[styles.smallBtn, styles.warn]} onPress={cancelTrip} disabled={busy}>
               <Text style={styles.smallBtnTextLight}>Clear ride</Text>
             </Pressable>
-            <Pressable style={[styles.smallBtn, styles.danger]} onPress={completeTrip} disabled={busy}>
+            <Pressable
+              style={[styles.smallBtn, styles.danger]}
+              onPress={completeTrip}
+              disabled={busy || activeTrip.status === "awaiting_rider_checkout"}
+            >
               <Text style={styles.smallBtnTextLight}>Complete trip</Text>
             </Pressable>
             <Pressable style={styles.smallBtn} onPress={logout}>

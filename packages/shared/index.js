@@ -5,6 +5,7 @@ export const TRIP_STATUSES = Object.freeze([
   "requested",
   "accepted",
   "in_progress",
+  "awaiting_rider_checkout",
   "completed",
   "cancelled",
 ]);

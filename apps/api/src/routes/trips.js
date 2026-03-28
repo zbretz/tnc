@@ -90,7 +90,7 @@ export function createTripsRouter(deps) {
         res.status(403).json({ error: "Only the rider or an admin driver can cancel a pending request" });
         return;
       }
-    } else if (["accepted", "in_progress"].includes(trip.status)) {
+    } else if (["accepted", "in_progress", "awaiting_rider_checkout"].includes(trip.status)) {
       if (!isRider && !isDriver && !isDriverAdmin) {
         res.status(403).json({ error: "Forbidden" });
         return;
@@ -406,7 +406,7 @@ export function createTripsRouter(deps) {
         res.status(403).json({ error: "Forbidden" });
         return;
       }
-      if (!["accepted", "in_progress"].includes(trip.status)) {
+      if (!["accepted", "in_progress", "awaiting_rider_checkout"].includes(trip.status)) {
         res.status(400).json({ error: "Tip can only be set on an active trip" });
         return;
       }
@@ -432,6 +432,90 @@ export function createTripsRouter(deps) {
     }
   });
 
+  /** Rider: after driver ends ride — set final tip (cents), charge fare+tip once, mark completed. */
+  r.post("/:id/finalize-checkout", authMiddleware, requireRole("rider"), async (req, res) => {
+    const id = req.params.id;
+    if (!mongoose.isValidObjectId(id)) {
+      res.status(400).json({ error: "Invalid id" });
+      return;
+    }
+    try {
+      const trip = await Trip.findById(id).exec();
+      if (!trip || String(trip.rider) !== String(req.userId)) {
+        res.status(403).json({ error: "Forbidden" });
+        return;
+      }
+      if (trip.status !== "awaiting_rider_checkout") {
+        res.status(400).json({ error: "Trip is not waiting for checkout" });
+        return;
+      }
+      const raw = req.body?.tipAmountCents;
+      if (raw === undefined || raw === null || raw === "") {
+        res.status(400).json({ error: "tipAmountCents required (integer cents >= 0)" });
+        return;
+      }
+      const n = Number(raw);
+      if (!Number.isFinite(n) || n < 0) {
+        res.status(400).json({ error: "tipAmountCents must be a non-negative number" });
+        return;
+      }
+      const tipCents = Math.round(n);
+      if (tipCents !== n) {
+        res.status(400).json({ error: "tipAmountCents must be a whole number of cents" });
+        return;
+      }
+      const fare = await resolveTripFareUsd(trip);
+      if (!fare.ok) {
+        res.status(400).json({ error: "Fare estimate unavailable; try again in a moment." });
+        return;
+      }
+      const fareCents = fare.totalUsd > 0 ? Math.round(fare.totalUsd * 100) : 0;
+      const maxTip = maxTipCentsAllowed(fareCents);
+      if (tipCents > maxTip) {
+        res.status(400).json({ error: `tipAmountCents cannot exceed ${maxTip}` });
+        return;
+      }
+      trip.riderTipAmountCents = tipCents;
+
+      const rider = await User.findById(trip.rider).exec();
+      if (!rider) {
+        res.status(500).json({ error: "Rider not found" });
+        return;
+      }
+      try {
+        await applyFareChargeToTrip(trip, rider);
+      } catch (e) {
+        console.error("[tnc] fare charge on finalize-checkout", e);
+        trip.fareChargeStatus = "failed";
+        trip.fareChargeError = e?.raw?.message || e?.message || "charge_error";
+      }
+
+      trip.status = "completed";
+      trip.etaToPickup = null;
+      trip.etaToDropoff = null;
+      clearPickupEtaThrottle(id);
+      await trip.save();
+
+      const actor = await User.findById(req.userId).select("role roles").lean().exec();
+      await recordTripStatusEvent({
+        tripId: trip._id,
+        fromStatus: "awaiting_rider_checkout",
+        toStatus: "completed",
+        actorUserId: req.userId,
+        actorRoles: rolesFromUserDoc(actor),
+        payload: {},
+      }).catch((e) => console.error("[tnc] TripEvent finalize checkout", e));
+
+      const out = await loadTripSerialized(id);
+      deps.onTripUpdated(out);
+      res.json({ trip: out });
+    } catch (e) {
+      console.error("POST /trips/:id/finalize-checkout", e);
+      res.status(500).json({ error: e?.message || "Server error" });
+    }
+  });
+
+  /** Driver: end driving — rider must finalize checkout (tip + single charge) before trip is completed. */
   r.post("/:id/complete", authMiddleware, requireRole("driver"), async (req, res) => {
     const id = req.params.id;
     if (!mongoose.isValidObjectId(id)) {
@@ -447,20 +531,8 @@ export function createTripsRouter(deps) {
       res.status(400).json({ error: "Trip not active" });
       return;
     }
-    const rider = await User.findById(trip.rider).exec();
-    if (!rider) {
-      res.status(500).json({ error: "Rider not found" });
-      return;
-    }
     const prev = trip.status;
-    try {
-      await applyFareChargeToTrip(trip, rider);
-    } catch (e) {
-      console.error("[tnc] fare charge on trip complete", e);
-      trip.fareChargeStatus = "failed";
-      trip.fareChargeError = e?.raw?.message || e?.message || "charge_error";
-    }
-    trip.status = "completed";
+    trip.status = "awaiting_rider_checkout";
     trip.etaToPickup = null;
     trip.etaToDropoff = null;
     clearPickupEtaThrottle(id);
@@ -469,11 +541,11 @@ export function createTripsRouter(deps) {
     await recordTripStatusEvent({
       tripId: trip._id,
       fromStatus: prev,
-      toStatus: "completed",
+      toStatus: "awaiting_rider_checkout",
       actorUserId: req.userId,
       actorRoles: rolesFromUserDoc(actor),
       payload: {},
-    }).catch((e) => console.error("[tnc] TripEvent complete", e));
+    }).catch((e) => console.error("[tnc] TripEvent request checkout", e));
     const out = await loadTripSerialized(id);
     deps.onTripUpdated(out);
     res.json({ trip: out });

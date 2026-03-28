@@ -262,6 +262,9 @@ function formatTripEtaLine(prefix, e) {
 /** Sheet banner for accepted (pickup leg) or in_progress (dropoff leg). */
 function riderAcceptedInProgressBannerCopy(trip, driverCoord) {
   const st = trip?.status;
+  if (st === "awaiting_rider_checkout") {
+    return "Driver ended the ride. Confirm tip and payment to finish.";
+  }
   if (st === "in_progress") {
     if (trip?.etaToDropoff) return formatTripEtaLine("ETA to destination", trip.etaToDropoff);
     if (driverCoord) return "ETA to destination: updating…";
@@ -278,6 +281,11 @@ const RIDER_MAP_CHROME_TOP =
   Platform.OS === "ios" ? 52 : Platform.OS === "android" ? 50 : 14;
 const RIDER_SETTINGS_TOP =
   Platform.OS === "ios" ? 54 : Platform.OS === "android" ? 54 : 16;
+
+/** Trip statuses where rider sees the active-trip map + dock (includes checkout after driver ends ride). */
+const RIDER_TRIP_MAP_STATUSES = ["requested", "accepted", "in_progress", "awaiting_rider_checkout"];
+/** Dropoff-leg map routing (driver toward destination). */
+const RIDER_TRIP_DROPOFF_LEG = ["in_progress", "awaiting_rider_checkout"];
 
 function stripUndefined(obj) {
   if (obj == null || typeof obj !== "object" || Array.isArray(obj)) return obj;
@@ -698,6 +706,9 @@ export default function App() {
   const [paymentMethodsHubCfg, setPaymentMethodsHubCfg] = useState(null);
   const [paymentMethodsHubError, setPaymentMethodsHubError] = useState(null);
 
+  const [checkoutTipCents, setCheckoutTipCents] = useState(0);
+  const [checkoutFinalizing, setCheckoutFinalizing] = useState(false);
+
   const { confirmSetupIntent, handleNextActionForSetup, resetPaymentSheetCustomer } = useStripe();
 
   /** Full planning reset — same baseline as a fresh “Select pickup” session (used after ride ends + on logout). */
@@ -864,6 +875,32 @@ export default function App() {
   }, [returnToPlanningAfterTripEnds]);
 
   useEffect(() => {
+    if (trip?.status !== "awaiting_rider_checkout") return;
+    const existing =
+      trip.riderTipAmountCents != null && Number.isFinite(Number(trip.riderTipAmountCents))
+        ? Math.round(Number(trip.riderTipAmountCents))
+        : 0;
+    setCheckoutTipCents(existing);
+  }, [trip?.status, trip?._id, trip?.riderTipAmountCents]);
+
+  const finalizeTripCheckout = useCallback(async () => {
+    if (!token || !trip?._id || trip.status !== "awaiting_rider_checkout") return;
+    setCheckoutFinalizing(true);
+    try {
+      const data = await api(`/trips/${trip._id}/finalize-checkout`, {
+        method: "POST",
+        token,
+        body: { tipAmountCents: checkoutTipCents },
+      });
+      if (data?.trip) applyIncomingTrip(data.trip);
+    } catch (e) {
+      Alert.alert("Could not complete payment", e?.message ? String(e.message) : String(e));
+    } finally {
+      setCheckoutFinalizing(false);
+    }
+  }, [token, trip?._id, trip?.status, checkoutTipCents, applyIncomingTrip]);
+
+  useEffect(() => {
     if (!token) {
       socketRef.current?.disconnect();
       socketRef.current = null;
@@ -923,7 +960,7 @@ export default function App() {
 
   useEffect(() => {
     if (!token || !trip?._id) return undefined;
-    if (!["requested", "accepted", "in_progress"].includes(trip.status)) return undefined;
+    if (!RIDER_TRIP_MAP_STATUSES.includes(trip.status)) return undefined;
     let cancelled = false;
     const tick = async () => {
       try {
@@ -1012,7 +1049,7 @@ export default function App() {
           ? { lat: Number(driverLive.lat), lng: Number(driverLive.lng) }
           : null;
     const from = st === "requested" ? p : live;
-    const target = st === "requested" ? d : st === "in_progress" ? d : p;
+    const target = st === "requested" ? d : RIDER_TRIP_DROPOFF_LEG.includes(st) ? d : p;
     if (!from || !target || ![from.lat, from.lng, target.lat, target.lng].every((n) => Number.isFinite(Number(n)))) {
       setTripRouteCoords(null);
       return;
@@ -1816,7 +1853,7 @@ export default function App() {
         live &&
         [p.lat, p.lng, d.lat, d.lng, live.lat, live.lng].every((n) => Number.isFinite(Number(n)))
       ) {
-        const target = st === "in_progress" ? d : p;
+        const target = RIDER_TRIP_DROPOFF_LEG.includes(st) ? d : p;
         const chord = [
           { latitude: live.lat, longitude: live.lng },
           { latitude: target.lat, longitude: target.lng },
@@ -2170,7 +2207,7 @@ export default function App() {
         longitudeDelta: spanAB(p, driverOK),
       };
     }
-    if (trip && driverOK && trip.status === "in_progress" && d) {
+    if (trip && driverOK && RIDER_TRIP_DROPOFF_LEG.includes(trip.status) && d) {
       return {
         latitude: (d.lat + driverOK.lat) / 2,
         longitude: (d.lng + driverOK.lng) / 2,
@@ -2232,7 +2269,7 @@ export default function App() {
     const { trip: t, displayPickup: p, displayDropoff: d } = activeTripCameraCtxRef.current;
     if (!t || !mapRef.current) return;
     const st = t.status;
-    if (!["requested", "accepted", "in_progress"].includes(st)) return;
+    if (!RIDER_TRIP_MAP_STATUSES.includes(st)) return;
 
     const pLL = p ? finiteMapCoord(p.lat, p.lng) : null;
     const dLL = d ? finiteMapCoord(d.lat, d.lng) : null;
@@ -2245,7 +2282,7 @@ export default function App() {
     } else if (st === "accepted") {
       if (drvLL && pLL) coords = [pLL, drvLL];
       else if (pLL && dLL) coords = [pLL, dLL];
-    } else if (st === "in_progress") {
+    } else if (st === "in_progress" || st === "awaiting_rider_checkout") {
       if (drvLL && dLL) coords = [dLL, drvLL];
       else if (pLL && dLL) coords = [pLL, dLL];
     }
@@ -2264,7 +2301,7 @@ export default function App() {
 
   useEffect(() => {
     if (!trip) return;
-    if (!["requested", "accepted", "in_progress"].includes(trip.status)) return;
+    if (!RIDER_TRIP_MAP_STATUSES.includes(trip.status)) return;
 
     const run = () => refitActiveTripCamera();
     const t1 = setTimeout(run, 100);
@@ -2282,7 +2319,7 @@ export default function App() {
 
   /** Driver location streams continuously; refitting on every tick fights map gestures. */
   useEffect(() => {
-    if (!trip || !["accepted", "in_progress"].includes(trip.status)) return;
+    if (!trip || !["accepted", "in_progress", "awaiting_rider_checkout"].includes(trip.status)) return;
     if (activeTripDriverInitialFitRef.current) return;
     const ok =
       driverCoord &&
@@ -2861,7 +2898,7 @@ export default function App() {
               </Marker>
             ) : null}
             {pickupMarkerCoord &&
-            (!trip || trip.status !== "in_progress") &&
+            (!trip || !RIDER_TRIP_DROPOFF_LEG.includes(trip.status)) &&
             (trip || bookingStep === "dropoff") ? (
               tripRequested ? (
                 <Marker coordinate={pickupMarkerCoord} title="Pickup" pinColor="#16a34a" />
@@ -2958,11 +2995,16 @@ export default function App() {
                     <Text style={styles.banner}>
                       {trip.status === "requested"
                         ? "Your request is live. You can still cancel below before a driver accepts."
-                        : trip.status === "accepted" || trip.status === "in_progress"
+                        : trip.status === "accepted" ||
+                            trip.status === "in_progress" ||
+                            trip.status === "awaiting_rider_checkout"
                           ? riderAcceptedInProgressBannerCopy(trip, driverCoord)
                           : `Trip: ${trip.status}`}
                     </Text>
-                    {(trip.status === "accepted" || trip.status === "in_progress") && trip.driverProfile ? (
+                    {(trip.status === "accepted" ||
+                      trip.status === "in_progress" ||
+                      trip.status === "awaiting_rider_checkout") &&
+                    trip.driverProfile ? (
                       <View style={styles.driverCard}>
                         {typeof trip.driverProfile.avatarUrl === "string" &&
                         (trip.driverProfile.avatarUrl.startsWith("http") ||
@@ -3024,10 +3066,63 @@ export default function App() {
                         )
                       ) : null}
                     </View>
+                    {trip.status === "awaiting_rider_checkout" ? (
+                      <View style={styles.checkoutTipBlock}>
+                        <Text style={styles.checkoutTipTitle}>Tip</Text>
+                        <Text style={styles.checkoutTipHint}>
+                          Your card is charged once for the ride fare plus the tip you choose.
+                        </Text>
+                        <View style={styles.checkoutTipChips}>
+                          {[
+                            { label: "No tip", cents: 0 },
+                            { label: "$3", cents: 300 },
+                            { label: "$5", cents: 500 },
+                            { label: "$10", cents: 1000 },
+                          ].map((opt) => (
+                            <Pressable
+                              key={opt.label}
+                              style={[
+                                styles.checkoutTipChip,
+                                checkoutTipCents === opt.cents && styles.checkoutTipChipSelected,
+                              ]}
+                              onPress={() => setCheckoutTipCents(opt.cents)}
+                              disabled={checkoutFinalizing}
+                            >
+                              <Text
+                                style={[
+                                  styles.checkoutTipChipText,
+                                  checkoutTipCents === opt.cents && styles.checkoutTipChipTextSelected,
+                                ]}
+                              >
+                                {opt.label}
+                              </Text>
+                            </Pressable>
+                          ))}
+                        </View>
+                        <Pressable
+                          style={[
+                            styles.checkoutConfirmBtn,
+                            checkoutFinalizing && styles.addCardModalBtnDisabled,
+                          ]}
+                          disabled={checkoutFinalizing}
+                          onPress={() => void finalizeTripCheckout()}
+                        >
+                          {checkoutFinalizing ? (
+                            <ActivityIndicator color="#fff" />
+                          ) : (
+                            <Text style={styles.checkoutConfirmBtnText}>Confirm & pay</Text>
+                          )}
+                        </Pressable>
+                      </View>
+                    ) : null}
                   </>
                   <View style={styles.row}>
                     {trip && trip.status !== "completed" && trip.status !== "cancelled" ? (
-                      <Pressable style={[styles.smallBtn, styles.warnBtn]} onPress={clearRide} disabled={busy}>
+                      <Pressable
+                        style={[styles.smallBtn, styles.warnBtn]}
+                        onPress={clearRide}
+                        disabled={busy || checkoutFinalizing}
+                      >
                         <Text style={styles.warnBtnText}>Clear ride</Text>
                       </Pressable>
                     ) : null}
@@ -3472,11 +3567,16 @@ export default function App() {
                 <Text style={styles.banner}>
                   {trip.status === "requested"
                     ? "Your request is live. You can still cancel below if plans change."
-                    : trip.status === "accepted" || trip.status === "in_progress"
+                    : trip.status === "accepted" ||
+                        trip.status === "in_progress" ||
+                        trip.status === "awaiting_rider_checkout"
                       ? riderAcceptedInProgressBannerCopy(trip, driverCoord)
                       : `Trip: ${trip.status}`}
                 </Text>
-                {(trip.status === "accepted" || trip.status === "in_progress") && trip.driverProfile ? (
+                {(trip.status === "accepted" ||
+                  trip.status === "in_progress" ||
+                  trip.status === "awaiting_rider_checkout") &&
+                trip.driverProfile ? (
                   <View style={styles.driverCard}>
                     {typeof trip.driverProfile.avatarUrl === "string" &&
                     (trip.driverProfile.avatarUrl.startsWith("http") ||
@@ -3538,10 +3638,63 @@ export default function App() {
                     )
                   ) : null}
                 </View>
+                {trip.status === "awaiting_rider_checkout" ? (
+                  <View style={styles.checkoutTipBlock}>
+                    <Text style={styles.checkoutTipTitle}>Tip</Text>
+                    <Text style={styles.checkoutTipHint}>
+                      Your card is charged once for the ride fare plus the tip you choose.
+                    </Text>
+                    <View style={styles.checkoutTipChips}>
+                      {[
+                        { label: "No tip", cents: 0 },
+                        { label: "$3", cents: 300 },
+                        { label: "$5", cents: 500 },
+                        { label: "$10", cents: 1000 },
+                      ].map((opt) => (
+                        <Pressable
+                          key={opt.label}
+                          style={[
+                            styles.checkoutTipChip,
+                            checkoutTipCents === opt.cents && styles.checkoutTipChipSelected,
+                          ]}
+                          onPress={() => setCheckoutTipCents(opt.cents)}
+                          disabled={checkoutFinalizing}
+                        >
+                          <Text
+                            style={[
+                              styles.checkoutTipChipText,
+                              checkoutTipCents === opt.cents && styles.checkoutTipChipTextSelected,
+                            ]}
+                          >
+                            {opt.label}
+                          </Text>
+                        </Pressable>
+                      ))}
+                    </View>
+                    <Pressable
+                      style={[
+                        styles.checkoutConfirmBtn,
+                        checkoutFinalizing && styles.addCardModalBtnDisabled,
+                      ]}
+                      disabled={checkoutFinalizing}
+                      onPress={() => void finalizeTripCheckout()}
+                    >
+                      {checkoutFinalizing ? (
+                        <ActivityIndicator color="#fff" />
+                      ) : (
+                        <Text style={styles.checkoutConfirmBtnText}>Confirm & pay</Text>
+                      )}
+                    </Pressable>
+                  </View>
+                ) : null}
               </>
               <View style={styles.row}>
                 {trip && trip.status !== "completed" && trip.status !== "cancelled" ? (
-                  <Pressable style={[styles.smallBtn, styles.warnBtn]} onPress={clearRide} disabled={busy}>
+                  <Pressable
+                    style={[styles.smallBtn, styles.warnBtn]}
+                    onPress={clearRide}
+                    disabled={busy || checkoutFinalizing}
+                  >
                     <Text style={styles.warnBtnText}>Clear ride</Text>
                   </Pressable>
                 ) : null}
@@ -4419,6 +4572,29 @@ const styles = StyleSheet.create({
   paymentHubSpinner: { marginVertical: 28 },
   paymentHubBody: { fontSize: 16, ...pj.m, color: "#334155", marginTop: 8, lineHeight: 22 },
   paymentHubHint: { fontSize: 14, ...pj.r, color: "#64748b", marginTop: 12, marginBottom: 20, lineHeight: 20 },
+  checkoutTipBlock: { marginTop: 16, paddingTop: 16, borderTopWidth: 1, borderTopColor: "#e2e8f0" },
+  checkoutTipTitle: { fontSize: 17, ...pj.sb, color: "#0f172a" },
+  checkoutTipHint: { fontSize: 14, ...pj.r, color: "#64748b", marginTop: 6, marginBottom: 12, lineHeight: 20 },
+  checkoutTipChips: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginBottom: 16 },
+  checkoutTipChip: {
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: "#cbd5e1",
+    backgroundColor: "#f8fafc",
+  },
+  checkoutTipChipSelected: { borderColor: "#0f172a", backgroundColor: "#0f172a" },
+  checkoutTipChipText: { fontSize: 14, ...pj.m, color: "#334155" },
+  checkoutTipChipTextSelected: { color: "#ffffff" },
+  checkoutConfirmBtn: {
+    alignItems: "center",
+    justifyContent: "center",
+    paddingVertical: 14,
+    borderRadius: 10,
+    backgroundColor: "#000000",
+  },
+  checkoutConfirmBtnText: { fontSize: 16, ...pj.sb, color: "#ffffff" },
 });
 
 function BookRideTravelTimeRow({ styles, farePreview }) {

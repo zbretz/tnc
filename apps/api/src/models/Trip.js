@@ -64,7 +64,7 @@ const tripSchema = new mongoose.Schema(
     preferredPickupAt: { type: Date, default: null },
     status: {
       type: String,
-      enum: ["requested", "accepted", "in_progress", "completed", "cancelled"],
+      enum: ["requested", "accepted", "in_progress", "awaiting_rider_checkout", "completed", "cancelled"],
       default: "requested",
     },
     driverLocation: {
