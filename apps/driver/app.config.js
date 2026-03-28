@@ -11,6 +11,8 @@ module.exports = {
   name: "TNC Driver",
   slug: "tnc-driver",
   version: "1.0.0",
+  /** Google Navigation SDK does not support RN New Architecture yet (see package README). */
+  newArchEnabled: false,
   orientation: "portrait",
   icon: "./assets/icon.png",
   userInterfaceStyle: "light",
@@ -25,6 +27,14 @@ module.exports = {
     infoPlist: {
       NSLocationWhenInUseUsageDescription:
         "We share your location with the rider after you accept a trip.",
+      /**
+       * Google Navigation SDK updates the road-snapped location client when guidance starts.
+       * Without `location` in UIBackgroundModes, Core Location can assert:
+       * `!stayUp || CLClientIsBackgroundable(...)`.
+       */
+      NSLocationAlwaysAndWhenInUseUsageDescription:
+        "Turn-by-turn navigation may need location access when the app is in the background so routing can continue.",
+      UIBackgroundModes: ["location"],
       NSAppTransportSecurity: {
         NSAllowsLocalNetworking: true,
       },
@@ -49,6 +59,15 @@ module.exports = {
   },
   plugins: [
     "expo-font",
+    [
+      "expo-build-properties",
+      {
+        android: { minSdkVersion: 24 },
+        ios: { deploymentTarget: "16.0" },
+      },
+    ],
+    "./plugins/withGoogleNavigationAndroid.js",
+    "./plugins/withIosSwiftLinkerFix.js",
     [
       "expo-location",
       {

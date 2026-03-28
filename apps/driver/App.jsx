@@ -32,6 +32,7 @@ import { io } from "socket.io-client";
 import { StatusBar } from "expo-status-bar";
 import Slider from "@react-native-community/slider";
 import { getApiUrl } from "./lib/config";
+import DriverInAppNavigationModal from "./DriverInAppNavigationModal";
 
 const TOKEN_KEY = "tnc_token_driver";
 
@@ -300,6 +301,8 @@ export default function App() {
   const [mapStyleId, setMapStyleId] = useState("default");
   /** Bumps on an interval so open-request cards re-render and refresh relative "Requested … ago" text. */
   const [requestRelativeTick, setRequestRelativeTick] = useState(0);
+  /** Native: Google Navigation SDK full-screen guidance; `key` forces a fresh session when reopening. */
+  const [inAppNavTarget, setInAppNavTarget] = useState(null);
   const socketRef = useRef(null);
   const watchRef = useRef(null);
   const mapRef = useRef(null);
@@ -342,6 +345,52 @@ export default function App() {
     },
     [dropoffLabel]
   );
+
+  const openInAppNavigatePickupFor = useCallback(
+    async (t) => {
+      if (!t?.pickup) return;
+      const la = Number(t.pickup.lat);
+      const lo = Number(t.pickup.lng);
+      if (!Number.isFinite(la) || !Number.isFinite(lo)) {
+        Alert.alert("Navigation", "Invalid coordinates.");
+        return;
+      }
+      const { status } = await Location.requestForegroundPermissionsAsync();
+      if (status !== "granted") {
+        Alert.alert(
+          "Location required",
+          "Google turn-by-turn needs location access. Enable it in Settings → Privacy → Location → TNC Driver."
+        );
+        return;
+      }
+      setInAppNavTarget({ lat: la, lng: lo, title: pickupLabel(t) || "Pickup", key: Date.now() });
+    },
+    [pickupLabel]
+  );
+
+  const openInAppNavigateDropoffFor = useCallback(
+    async (t) => {
+      if (t?.dropoff?.lat == null || t?.dropoff?.lng == null) return;
+      const la = Number(t.dropoff.lat);
+      const lo = Number(t.dropoff.lng);
+      if (!Number.isFinite(la) || !Number.isFinite(lo)) {
+        Alert.alert("Navigation", "Invalid coordinates.");
+        return;
+      }
+      const { status } = await Location.requestForegroundPermissionsAsync();
+      if (status !== "granted") {
+        Alert.alert(
+          "Location required",
+          "Google turn-by-turn needs location access. Enable it in Settings → Privacy → Location → TNC Driver."
+        );
+        return;
+      }
+      setInAppNavTarget({ lat: la, lng: lo, title: dropoffLabel(t) || "Dropoff", key: Date.now() });
+    },
+    [dropoffLabel]
+  );
+
+  const closeInAppNav = useCallback(() => setInAppNavTarget(null), []);
 
   const loadAvailable = useCallback(async (t) => {
     try {
@@ -672,6 +721,7 @@ export default function App() {
     setAvailable([]);
     setMe(null);
     setSessionUser(null);
+    setInAppNavTarget(null);
   };
 
   /** Admin: cancel an open request or any in-progress trip (API allows driver+isAdmin). */
@@ -942,6 +992,17 @@ export default function App() {
     me?.lng,
   ]);
 
+  const inAppNavModal = (
+    <DriverInAppNavigationModal
+      key={inAppNavTarget?.key ?? "nav-closed"}
+      visible={inAppNavTarget != null}
+      onClose={closeInAppNav}
+      destinationTitle={inAppNavTarget?.title}
+      lat={inAppNavTarget?.lat}
+      lng={inAppNavTarget?.lng}
+    />
+  );
+
   if (!token) {
     return (
       <View style={styles.authPicker}>
@@ -985,6 +1046,7 @@ export default function App() {
           }
         />
         {busy ? <ActivityIndicator style={styles.pickerSpinner} /> : null}
+        {inAppNavModal}
       </View>
     );
   }
@@ -1093,6 +1155,20 @@ export default function App() {
                 <Text style={styles.smallBtnText}>Nav: dropoff</Text>
               </Pressable>
             ) : null}
+            {Platform.OS !== "web" ? (
+              <>
+                {!enRouteDropoff ? (
+                  <Pressable style={styles.smallBtn} onPress={() => void openInAppNavigatePickupFor(activeTrip)}>
+                    <Text style={styles.smallBtnText}>In-app: pickup</Text>
+                  </Pressable>
+                ) : null}
+                {enRouteDropoff && hasDrop ? (
+                  <Pressable style={styles.smallBtn} onPress={() => void openInAppNavigateDropoffFor(activeTrip)}>
+                    <Text style={styles.smallBtnText}>In-app: dropoff</Text>
+                  </Pressable>
+                ) : null}
+              </>
+            ) : null}
           </View>
           {activeTrip.status === "accepted" ? (
             <View style={styles.row}>
@@ -1117,6 +1193,7 @@ export default function App() {
             </Pressable>
           </View>
         </View>
+        {inAppNavModal}
       </View>
     );
   }
@@ -1201,6 +1278,18 @@ export default function App() {
                 <Text style={styles.smallBtnText}>Nav: dropoff</Text>
               </Pressable>
             ) : null}
+            {Platform.OS !== "web" ? (
+              <>
+                <Pressable style={styles.smallBtn} onPress={() => void openInAppNavigatePickupFor(previewTrip)}>
+                  <Text style={styles.smallBtnText}>In-app: pickup</Text>
+                </Pressable>
+                {previewTrip.dropoff?.lat != null && previewTrip.dropoff?.lng != null ? (
+                  <Pressable style={styles.smallBtn} onPress={() => void openInAppNavigateDropoffFor(previewTrip)}>
+                    <Text style={styles.smallBtnText}>In-app: dropoff</Text>
+                  </Pressable>
+                ) : null}
+              </>
+            ) : null}
           </View>
           <View style={styles.row}>
             <Pressable style={[styles.smallBtn, styles.acceptSmall]} onPress={() => accept(previewTrip._id)} disabled={busy}>
@@ -1223,6 +1312,7 @@ export default function App() {
             </Pressable>
           ) : null}
         </View>
+        {inAppNavModal}
       </View>
     );
   }
@@ -1477,6 +1567,7 @@ export default function App() {
       <Pressable style={styles.footerBtn} onPress={logout}>
         <Text style={styles.footerBtnText}>Log out</Text>
       </Pressable>
+      {inAppNavModal}
     </View>
   );
 }

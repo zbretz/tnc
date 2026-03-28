@@ -1,0 +1,61 @@
+diff --git a/node_modules/@googlemaps/react-native-navigation-sdk/ios/react-native-navigation-sdk/NavEventDispatcher.m b/node_modules/@googlemaps/react-native-navigation-sdk/ios/react-native-navigation-sdk/NavEventDispatcher.m
+index dbdb9a4..a4e85df 100644
+--- a/node_modules/@googlemaps/react-native-navigation-sdk/ios/react-native-navigation-sdk/NavEventDispatcher.m
++++ b/node_modules/@googlemaps/react-native-navigation-sdk/ios/react-native-navigation-sdk/NavEventDispatcher.m
+@@ -66,11 +66,12 @@ RCT_EXPORT_MODULE(NavEventDispatcher);
+ }
+ 
+ - (void)sendEventName:(NSString *)eventName body:(id)body {
+-  if (hasListeners) {
+-    [self sendEventWithName:eventName body:body];
+-  } else {
+-    NSLog(@"NavEventDispatcher sendEventName called without listeners: %@", eventName);
++  // RN New Architecture: startObserving/hasListeners can lag behind JS addListener, dropping events
++  // (e.g. onNavigationReady) so navigation never proceeds. Always emit; JS ignores if unsubscribed.
++  if (!hasListeners) {
++    NSLog(@"NavEventDispatcher sendEventName (no native hasListeners flag yet): %@", eventName);
+   }
++  [self sendEventWithName:eventName body:body];
+ }
+ 
+ @end
+diff --git a/node_modules/@googlemaps/react-native-navigation-sdk/ios/react-native-navigation-sdk/NavView.h b/node_modules/@googlemaps/react-native-navigation-sdk/ios/react-native-navigation-sdk/NavView.h
+index d3c646a..79bd6b1 100644
+--- a/node_modules/@googlemaps/react-native-navigation-sdk/ios/react-native-navigation-sdk/NavView.h
++++ b/node_modules/@googlemaps/react-native-navigation-sdk/ios/react-native-navigation-sdk/NavView.h
+@@ -25,7 +25,8 @@
+ @interface NavView : UIView <INavigationViewCallback>
+ 
+ @property(nonatomic, copy) RCTDirectEventBlock onRecenterButtonClick;
+-@property(nonatomic, copy) RCTDirectEventBlock onMapReady;
++/** Bubbling to match react-native-maps (AIRGoogleMap); avoids RN debug: topMapReady double-registration. */
++@property(nonatomic, copy) RCTBubblingEventBlock onMapReady;
+ @property(nonatomic, copy) RCTDirectEventBlock onMapClick;
+ @property(nonatomic, copy) RCTDirectEventBlock onMarkerInfoWindowTapped;
+ @property(nonatomic, copy) RCTDirectEventBlock onMarkerClick;
+diff --git a/node_modules/@googlemaps/react-native-navigation-sdk/ios/react-native-navigation-sdk/NavView.m b/node_modules/@googlemaps/react-native-navigation-sdk/ios/react-native-navigation-sdk/NavView.m
+index f48a844..f8aac47 100644
+--- a/node_modules/@googlemaps/react-native-navigation-sdk/ios/react-native-navigation-sdk/NavView.m
++++ b/node_modules/@googlemaps/react-native-navigation-sdk/ios/react-native-navigation-sdk/NavView.m
+@@ -116,7 +116,7 @@
+ 
+ - (void)handleMapReady {
+   if (self.onMapReady) {
+-    self.onMapReady(nil);
++    self.onMapReady(@{});
+   }
+ }
+ 
+diff --git a/node_modules/@googlemaps/react-native-navigation-sdk/ios/react-native-navigation-sdk/RCTNavViewManager.m b/node_modules/@googlemaps/react-native-navigation-sdk/ios/react-native-navigation-sdk/RCTNavViewManager.m
+index faccb94..ab1d203 100644
+--- a/node_modules/@googlemaps/react-native-navigation-sdk/ios/react-native-navigation-sdk/RCTNavViewManager.m
++++ b/node_modules/@googlemaps/react-native-navigation-sdk/ios/react-native-navigation-sdk/RCTNavViewManager.m
+@@ -92,7 +92,7 @@ RCT_EXPORT_MODULE();
+ }
+ 
+ RCT_EXPORT_VIEW_PROPERTY(onRecenterButtonClick, RCTDirectEventBlock);
+-RCT_EXPORT_VIEW_PROPERTY(onMapReady, RCTDirectEventBlock);
++RCT_EXPORT_VIEW_PROPERTY(onMapReady, RCTBubblingEventBlock);
+ RCT_EXPORT_VIEW_PROPERTY(onMapClick, RCTDirectEventBlock);
+ RCT_EXPORT_VIEW_PROPERTY(onMarkerInfoWindowTapped, RCTDirectEventBlock);
+ RCT_EXPORT_VIEW_PROPERTY(onMarkerClick, RCTDirectEventBlock);
