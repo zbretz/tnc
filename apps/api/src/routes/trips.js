@@ -11,7 +11,13 @@ import { computeFareEstimate } from "../fareEstimate.js";
 import { fetchDrivingRouteSummary } from "../googleDirections.js";
 import { directionsApiKey } from "../lib/mapsKeys.js";
 import { recordTripStatusEvent } from "../lib/tripEvents.js";
-import { applyFareChargeToTrip, maxTipCentsAllowed, resolveTripFareUsd } from "../lib/chargeTripFare.js";
+import { maxTipCentsAllowed, resolveTripFareUsd } from "../lib/chargeTripFare.js";
+import { finalizeAwaitingTripCheckout } from "../lib/finalizeAwaitingTripCheckout.js";
+import {
+  cancelRiderCheckoutDeadline,
+  checkoutDeadlineAfterNow,
+  scheduleRiderCheckoutDeadline,
+} from "../lib/checkoutAgenda.js";
 import { getStripe, stripeEnabled } from "../lib/stripe.js";
 import { effectiveRequirePaymentMethodToBook } from "../lib/paymentPolicy.js";
 
@@ -103,8 +109,10 @@ export function createTripsRouter(deps) {
     trip.status = "cancelled";
     trip.etaToPickup = null;
     trip.etaToDropoff = null;
+    trip.awaitingRiderCheckoutDeadlineAt = null;
     clearPickupEtaThrottle(id);
     await trip.save();
+    await cancelRiderCheckoutDeadline(id);
     await recordTripStatusEvent({
       tripId: trip._id,
       fromStatus: prev,
@@ -464,51 +472,43 @@ export function createTripsRouter(deps) {
         res.status(400).json({ error: "tipAmountCents must be a whole number of cents" });
         return;
       }
-      const fare = await resolveTripFareUsd(trip);
-      if (!fare.ok) {
-        res.status(400).json({ error: "Fare estimate unavailable; try again in a moment." });
-        return;
-      }
-      const fareCents = fare.totalUsd > 0 ? Math.round(fare.totalUsd * 100) : 0;
-      const maxTip = maxTipCentsAllowed(fareCents);
-      if (tipCents > maxTip) {
-        res.status(400).json({ error: `tipAmountCents cannot exceed ${maxTip}` });
-        return;
-      }
-      trip.riderTipAmountCents = tipCents;
-
-      const rider = await User.findById(trip.rider).exec();
-      if (!rider) {
-        res.status(500).json({ error: "Rider not found" });
-        return;
-      }
-      try {
-        await applyFareChargeToTrip(trip, rider);
-      } catch (e) {
-        console.error("[tnc] fare charge on finalize-checkout", e);
-        trip.fareChargeStatus = "failed";
-        trip.fareChargeError = e?.raw?.message || e?.message || "charge_error";
-      }
-
-      trip.status = "completed";
-      trip.etaToPickup = null;
-      trip.etaToDropoff = null;
-      clearPickupEtaThrottle(id);
-      await trip.save();
 
       const actor = await User.findById(req.userId).select("role roles").lean().exec();
-      await recordTripStatusEvent({
-        tripId: trip._id,
-        fromStatus: "awaiting_rider_checkout",
-        toStatus: "completed",
+      const result = await finalizeAwaitingTripCheckout(id, {
+        tipCents,
         actorUserId: req.userId,
         actorRoles: rolesFromUserDoc(actor),
-        payload: {},
-      }).catch((e) => console.error("[tnc] TripEvent finalize checkout", e));
+        eventPayload: {},
+      });
 
-      const out = await loadTripSerialized(id);
-      deps.onTripUpdated(out);
-      res.json({ trip: out });
+      if (!result.ok) {
+        if (result.error === "not_awaiting") {
+          res.status(400).json({ error: "Trip is not waiting for checkout" });
+          return;
+        }
+        if (result.error === "tip_too_large") {
+          res.status(400).json({ error: `tipAmountCents cannot exceed ${result.maxTip}` });
+          return;
+        }
+        if (result.error === "fare_unavailable") {
+          res.status(400).json({ error: "Fare estimate unavailable; try again in a moment." });
+          return;
+        }
+        if (result.error === "tip_invalid") {
+          res.status(400).json({ error: "tipAmountCents must be a whole number of cents" });
+          return;
+        }
+        if (result.error === "rider_not_found") {
+          res.status(500).json({ error: "Rider not found" });
+          return;
+        }
+        res.status(400).json({ error: result.error || "Cannot finalize checkout" });
+        return;
+      }
+
+      await cancelRiderCheckoutDeadline(id);
+      deps.onTripUpdated(result.trip);
+      res.json({ trip: result.trip });
     } catch (e) {
       console.error("POST /trips/:id/finalize-checkout", e);
       res.status(500).json({ error: e?.message || "Server error" });
@@ -533,10 +533,12 @@ export function createTripsRouter(deps) {
     }
     const prev = trip.status;
     trip.status = "awaiting_rider_checkout";
+    trip.awaitingRiderCheckoutDeadlineAt = checkoutDeadlineAfterNow();
     trip.etaToPickup = null;
     trip.etaToDropoff = null;
     clearPickupEtaThrottle(id);
     await trip.save();
+    await scheduleRiderCheckoutDeadline(trip._id, trip.awaitingRiderCheckoutDeadlineAt);
     const actor = await User.findById(req.userId).select("role roles").lean().exec();
     await recordTripStatusEvent({
       tripId: trip._id,

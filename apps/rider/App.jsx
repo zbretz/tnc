@@ -72,6 +72,13 @@ const RIDER_TRIP_END_DEFER_MS = 320;
 /** Last valid snap index for PLANNING_SNAP_POINTS (dynamic sizing off — indices must stay in range). */
 const PLANNING_SNAP_MAX_INDEX = PLANNING_SNAP_POINTS.length - 1;
 
+const RIDER_CHECKOUT_TIP_OPTIONS = [
+  { label: "No tip", cents: 0 },
+  { label: "$3", cents: 300 },
+  { label: "$5", cents: 500 },
+  { label: "$10", cents: 1000 },
+];
+
 function clampPlanningSnapIndex(i) {
   const n = typeof i === "number" ? i : Number(i);
   if (!Number.isFinite(n)) return 0;
@@ -708,6 +715,7 @@ export default function App() {
 
   const [checkoutTipCents, setCheckoutTipCents] = useState(0);
   const [checkoutFinalizing, setCheckoutFinalizing] = useState(false);
+  const [checkoutDeadlineTick, setCheckoutDeadlineTick] = useState(0);
 
   const { confirmSetupIntent, handleNextActionForSetup, resetPaymentSheetCustomer } = useStripe();
 
@@ -899,6 +907,30 @@ export default function App() {
       setCheckoutFinalizing(false);
     }
   }, [token, trip?._id, trip?.status, checkoutTipCents, applyIncomingTrip]);
+
+  const checkoutModalVisible = trip?.status === "awaiting_rider_checkout";
+
+  useEffect(() => {
+    if (!checkoutModalVisible || !trip?.awaitingRiderCheckoutDeadlineAt) return undefined;
+    const t = setInterval(() => setCheckoutDeadlineTick((x) => x + 1), 15000);
+    return () => clearInterval(t);
+  }, [checkoutModalVisible, trip?.awaitingRiderCheckoutDeadlineAt]);
+
+  const checkoutDeadlineHint = useMemo(() => {
+    const iso = trip?.awaitingRiderCheckoutDeadlineAt;
+    if (!iso || typeof iso !== "string") return null;
+    const end = new Date(iso).getTime();
+    if (!Number.isFinite(end)) return null;
+    const ms = end - Date.now();
+    if (ms <= 0) {
+      return "Your fare will be charged automatically if you do not confirm.";
+    }
+    const m = Math.max(1, Math.ceil(ms / 60000));
+    if (m === 1) {
+      return "Your fare will be charged automatically in about 1 minute if you do not confirm.";
+    }
+    return `Your fare will be charged automatically in about ${m} minutes if you do not confirm.`;
+  }, [trip?.awaitingRiderCheckoutDeadlineAt, checkoutDeadlineTick]);
 
   useEffect(() => {
     if (!token) {
@@ -2760,6 +2792,71 @@ export default function App() {
           </View>
         </Modal>
       ) : null}
+      <Modal
+        visible={checkoutModalVisible}
+        animationType="fade"
+        transparent
+        statusBarTranslucent
+        presentationStyle={Platform.OS === "ios" ? "overFullScreen" : undefined}
+        onRequestClose={() => {}}
+      >
+        <View style={styles.checkoutModalRoot}>
+          <View style={styles.checkoutModalDim} pointerEvents="none" />
+          <View style={styles.checkoutModalCard}>
+            <Text style={styles.checkoutModalTitle}>Ride complete</Text>
+            <Text style={styles.checkoutModalSubtitle}>
+              Choose a tip and confirm — your card is charged once for fare plus tip.
+            </Text>
+            {checkoutDeadlineHint ? (
+              <Text style={styles.checkoutModalDeadline}>{checkoutDeadlineHint}</Text>
+            ) : null}
+            <Text style={styles.checkoutTipTitle}>Tip</Text>
+            <View style={styles.checkoutTipChips}>
+              {RIDER_CHECKOUT_TIP_OPTIONS.map((opt) => (
+                <Pressable
+                  key={opt.label}
+                  style={[
+                    styles.checkoutTipChip,
+                    checkoutTipCents === opt.cents && styles.checkoutTipChipSelected,
+                  ]}
+                  onPress={() => setCheckoutTipCents(opt.cents)}
+                  disabled={checkoutFinalizing}
+                >
+                  <Text
+                    style={[
+                      styles.checkoutTipChipText,
+                      checkoutTipCents === opt.cents && styles.checkoutTipChipTextSelected,
+                    ]}
+                  >
+                    {opt.label}
+                  </Text>
+                </Pressable>
+              ))}
+            </View>
+            <Pressable
+              style={[
+                styles.checkoutConfirmBtn,
+                checkoutFinalizing && styles.addCardModalBtnDisabled,
+              ]}
+              disabled={checkoutFinalizing}
+              onPress={() => void finalizeTripCheckout()}
+            >
+              {checkoutFinalizing ? (
+                <ActivityIndicator color="#fff" />
+              ) : (
+                <Text style={styles.checkoutConfirmBtnText}>Confirm & pay</Text>
+              )}
+            </Pressable>
+            <Pressable
+              style={[styles.smallBtn, styles.warnBtn, styles.checkoutModalClearRide]}
+              onPress={() => void clearRide()}
+              disabled={busy || checkoutFinalizing}
+            >
+              <Text style={styles.warnBtnText}>Clear ride</Text>
+            </Pressable>
+          </View>
+        </View>
+      </Modal>
       {showRidersClosedGate ? (
         <View style={styles.ridersClosedLayer} pointerEvents="box-none">
           <View style={styles.ridersClosedCard} pointerEvents="auto">
@@ -3066,55 +3163,6 @@ export default function App() {
                         )
                       ) : null}
                     </View>
-                    {trip.status === "awaiting_rider_checkout" ? (
-                      <View style={styles.checkoutTipBlock}>
-                        <Text style={styles.checkoutTipTitle}>Tip</Text>
-                        <Text style={styles.checkoutTipHint}>
-                          Your card is charged once for the ride fare plus the tip you choose.
-                        </Text>
-                        <View style={styles.checkoutTipChips}>
-                          {[
-                            { label: "No tip", cents: 0 },
-                            { label: "$3", cents: 300 },
-                            { label: "$5", cents: 500 },
-                            { label: "$10", cents: 1000 },
-                          ].map((opt) => (
-                            <Pressable
-                              key={opt.label}
-                              style={[
-                                styles.checkoutTipChip,
-                                checkoutTipCents === opt.cents && styles.checkoutTipChipSelected,
-                              ]}
-                              onPress={() => setCheckoutTipCents(opt.cents)}
-                              disabled={checkoutFinalizing}
-                            >
-                              <Text
-                                style={[
-                                  styles.checkoutTipChipText,
-                                  checkoutTipCents === opt.cents && styles.checkoutTipChipTextSelected,
-                                ]}
-                              >
-                                {opt.label}
-                              </Text>
-                            </Pressable>
-                          ))}
-                        </View>
-                        <Pressable
-                          style={[
-                            styles.checkoutConfirmBtn,
-                            checkoutFinalizing && styles.addCardModalBtnDisabled,
-                          ]}
-                          disabled={checkoutFinalizing}
-                          onPress={() => void finalizeTripCheckout()}
-                        >
-                          {checkoutFinalizing ? (
-                            <ActivityIndicator color="#fff" />
-                          ) : (
-                            <Text style={styles.checkoutConfirmBtnText}>Confirm & pay</Text>
-                          )}
-                        </Pressable>
-                      </View>
-                    ) : null}
                   </>
                   <View style={styles.row}>
                     {trip && trip.status !== "completed" && trip.status !== "cancelled" ? (
@@ -3638,55 +3686,6 @@ export default function App() {
                     )
                   ) : null}
                 </View>
-                {trip.status === "awaiting_rider_checkout" ? (
-                  <View style={styles.checkoutTipBlock}>
-                    <Text style={styles.checkoutTipTitle}>Tip</Text>
-                    <Text style={styles.checkoutTipHint}>
-                      Your card is charged once for the ride fare plus the tip you choose.
-                    </Text>
-                    <View style={styles.checkoutTipChips}>
-                      {[
-                        { label: "No tip", cents: 0 },
-                        { label: "$3", cents: 300 },
-                        { label: "$5", cents: 500 },
-                        { label: "$10", cents: 1000 },
-                      ].map((opt) => (
-                        <Pressable
-                          key={opt.label}
-                          style={[
-                            styles.checkoutTipChip,
-                            checkoutTipCents === opt.cents && styles.checkoutTipChipSelected,
-                          ]}
-                          onPress={() => setCheckoutTipCents(opt.cents)}
-                          disabled={checkoutFinalizing}
-                        >
-                          <Text
-                            style={[
-                              styles.checkoutTipChipText,
-                              checkoutTipCents === opt.cents && styles.checkoutTipChipTextSelected,
-                            ]}
-                          >
-                            {opt.label}
-                          </Text>
-                        </Pressable>
-                      ))}
-                    </View>
-                    <Pressable
-                      style={[
-                        styles.checkoutConfirmBtn,
-                        checkoutFinalizing && styles.addCardModalBtnDisabled,
-                      ]}
-                      disabled={checkoutFinalizing}
-                      onPress={() => void finalizeTripCheckout()}
-                    >
-                      {checkoutFinalizing ? (
-                        <ActivityIndicator color="#fff" />
-                      ) : (
-                        <Text style={styles.checkoutConfirmBtnText}>Confirm & pay</Text>
-                      )}
-                    </Pressable>
-                  </View>
-                ) : null}
               </>
               <View style={styles.row}>
                 {trip && trip.status !== "completed" && trip.status !== "cancelled" ? (
@@ -4572,9 +4571,59 @@ const styles = StyleSheet.create({
   paymentHubSpinner: { marginVertical: 28 },
   paymentHubBody: { fontSize: 16, ...pj.m, color: "#334155", marginTop: 8, lineHeight: 22 },
   paymentHubHint: { fontSize: 14, ...pj.r, color: "#64748b", marginTop: 12, marginBottom: 20, lineHeight: 20 },
-  checkoutTipBlock: { marginTop: 16, paddingTop: 16, borderTopWidth: 1, borderTopColor: "#e2e8f0" },
-  checkoutTipTitle: { fontSize: 17, ...pj.sb, color: "#0f172a" },
-  checkoutTipHint: { fontSize: 14, ...pj.r, color: "#64748b", marginTop: 6, marginBottom: 12, lineHeight: 20 },
+  checkoutModalRoot: {
+    flex: 1,
+    position: "relative",
+    justifyContent: "center",
+    paddingHorizontal: 20,
+    paddingVertical: 28,
+  },
+  checkoutModalDim: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: "rgba(15, 23, 42, 0.58)",
+  },
+  checkoutModalCard: {
+    position: "relative",
+    zIndex: 1,
+    alignSelf: "center",
+    width: "100%",
+    maxWidth: 400,
+    maxHeight: "88%",
+    backgroundColor: "#ffffff",
+    borderRadius: 16,
+    paddingHorizontal: 22,
+    paddingTop: 22,
+    paddingBottom: 20,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.18,
+    shadowRadius: 24,
+    elevation: 12,
+  },
+  checkoutModalTitle: { fontSize: 22, ...pj.sb, color: "#0f172a", textAlign: "center" },
+  checkoutModalSubtitle: {
+    fontSize: 15,
+    ...pj.r,
+    color: "#475569",
+    textAlign: "center",
+    marginTop: 10,
+    lineHeight: 22,
+  },
+  checkoutModalDeadline: {
+    fontSize: 14,
+    ...pj.m,
+    color: "#b45309",
+    textAlign: "center",
+    marginTop: 14,
+    lineHeight: 20,
+    backgroundColor: "#fffbeb",
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderRadius: 10,
+    overflow: "hidden",
+  },
+  checkoutModalClearRide: { alignSelf: "center", marginTop: 14 },
+  checkoutTipTitle: { fontSize: 17, ...pj.sb, color: "#0f172a", marginTop: 18 },
   checkoutTipChips: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginBottom: 16 },
   checkoutTipChip: {
     paddingVertical: 10,

@@ -10,6 +10,8 @@
     "nodemon": "^3.1.9"
   },
   "dependencies": {
+    "@agendajs/mongo-backend": "^4.0.0",
+    "agenda": "^6.2.3",
     "bcryptjs": "^2.4.3",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",

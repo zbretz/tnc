@@ -18,6 +18,7 @@ import {
   riderFacingRiderServicePayload,
 } from "./models/AppSettings.js";
 import { createAdminRouter } from "./routes/admin.js";
+import { initCheckoutAgenda } from "./lib/checkoutAgenda.js";
 import { routesRouter } from "./routes/routes.js";
 import { pricingRouter } from "./routes/pricing.js";
 import { paymentsRouter } from "./routes/payments.js";
@@ -179,6 +180,12 @@ mongoose
     if (process.env.TNC_DEV_AUTH === "1") {
       await seedDevDriversIfNeeded().catch((e) => console.error("[tnc] seedDevDriversIfNeeded", e));
     }
+    await initCheckoutAgenda(mongoose.connection, {
+      onTripUpdated(trip) {
+        emitTripRoom(trip._id, "trip:updated", { trip });
+        io.to("drivers").emit("trips:refresh");
+      },
+    }).catch((e) => console.error("[tnc] initCheckoutAgenda", e));
     httpServer.listen(PORT, "0.0.0.0", () => {
       console.log(`API + Socket.io listening on http://0.0.0.0:${PORT} (use your LAN IP from a device)`);
     });

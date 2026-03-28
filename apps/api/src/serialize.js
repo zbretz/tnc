@@ -124,6 +124,9 @@ export function serializeTrip(t, options = {}) {
     ...(t.dropoffAddress ? { dropoffAddress: t.dropoffAddress } : {}),
     ...(t.preferredPickupAt ? { preferredPickupAt: t.preferredPickupAt.toISOString() } : {}),
     status: t.status,
+    ...(t.awaitingRiderCheckoutDeadlineAt
+      ? { awaitingRiderCheckoutDeadlineAt: t.awaitingRiderCheckoutDeadlineAt.toISOString() }
+      : {}),
     ...(riderPhone ? { riderPhone } : {}),
     driverLocation: t.driverLocation?.updatedAt
       ? {
