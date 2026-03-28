@@ -72,12 +72,71 @@ const RIDER_TRIP_END_DEFER_MS = 320;
 /** Last valid snap index for PLANNING_SNAP_POINTS (dynamic sizing off — indices must stay in range). */
 const PLANNING_SNAP_MAX_INDEX = PLANNING_SNAP_POINTS.length - 1;
 
-const RIDER_CHECKOUT_TIP_OPTIONS = [
-  { label: "No tip", cents: 0 },
-  { label: "$3", cents: 300 },
-  { label: "$5", cents: 500 },
-  { label: "$10", cents: 1000 },
-];
+/** Match server default `TNC_MAX_TIP_USD` in apps/api (used only to clamp UI). */
+const RIDER_TIP_MAX_USD_FALLBACK = 500;
+/** Fares below this use fixed $ presets; at or above use percentage presets. */
+const RIDER_CHECKOUT_TIP_FARE_THRESHOLD_USD = 30;
+
+function tripQuotedFareUsd(trip) {
+  const t = trip?.fareEstimate?.total;
+  const n = typeof t === "number" ? t : Number(t);
+  return Number.isFinite(n) ? n : NaN;
+}
+
+function maxTipCentsForQuotedFareClient(fareCents) {
+  const absMax = Math.round(RIDER_TIP_MAX_USD_FALLBACK * 100);
+  if (!fareCents || fareCents <= 0) return absMax;
+  return Math.min(absMax, Math.round(fareCents * 2));
+}
+
+function parseTipDollarInputToCents(text, maxCents) {
+  const cleaned = String(text ?? "")
+    .trim()
+    .replace(/[$\s,]/g, "");
+  if (cleaned === "" || cleaned === ".") return null;
+  const n = Number(cleaned);
+  if (!Number.isFinite(n) || n < 0) return null;
+  return Math.min(maxCents, Math.round(n * 100));
+}
+
+/**
+ * @returns {{ key: string, label: string, cents: number }[]}
+ */
+function dedupeTipChipsByCents(chips) {
+  const seen = new Set();
+  return chips.filter((c) => {
+    if (seen.has(c.cents)) return false;
+    seen.add(c.cents);
+    return true;
+  });
+}
+
+function buildCheckoutTipPresetChips(fareUsd, fareCents, maxTipCents) {
+  const useFixed =
+    !Number.isFinite(fareUsd) || fareUsd < RIDER_CHECKOUT_TIP_FARE_THRESHOLD_USD;
+  if (useFixed) {
+    return dedupeTipChipsByCents([
+      { key: "f0", label: "No tip", cents: 0 },
+      { key: "f300", label: "$3", cents: Math.min(300, maxTipCents) },
+      { key: "f500", label: "$5", cents: Math.min(500, maxTipCents) },
+      { key: "f1000", label: "$10", cents: Math.min(1000, maxTipCents) },
+    ]);
+  }
+  const pcts = [
+    { key: "p10", pct: 10, label: "10%" },
+    { key: "p15", pct: 15, label: "15%" },
+    { key: "p20", pct: 20, label: "20%" },
+  ];
+  return dedupeTipChipsByCents([
+    { key: "f0", label: "No tip", cents: 0 },
+    ...pcts.map(({ key, pct, label }) => {
+      const raw = Math.round((fareCents * pct) / 100);
+      const cents = Math.min(maxTipCents, raw);
+      const dollars = (cents / 100).toFixed(2);
+      return { key, label: `${label} ($${dollars})`, cents };
+    }),
+  ]);
+}
 
 function clampPlanningSnapIndex(i) {
   const n = typeof i === "number" ? i : Number(i);
@@ -714,8 +773,12 @@ export default function App() {
   const [paymentMethodsHubError, setPaymentMethodsHubError] = useState(null);
 
   const [checkoutTipCents, setCheckoutTipCents] = useState(0);
+  const [checkoutTipCustom, setCheckoutTipCustom] = useState(false);
+  const [checkoutSuggestedExpanded, setCheckoutSuggestedExpanded] = useState(false);
+  const [checkoutCustomTipText, setCheckoutCustomTipText] = useState("");
   const [checkoutFinalizing, setCheckoutFinalizing] = useState(false);
   const [checkoutDeadlineTick, setCheckoutDeadlineTick] = useState(0);
+  const checkoutTripSyncKeyRef = useRef("");
 
   const { confirmSetupIntent, handleNextActionForSetup, resetPaymentSheetCustomer } = useStripe();
 
@@ -883,22 +946,99 @@ export default function App() {
   }, [returnToPlanningAfterTripEnds]);
 
   useEffect(() => {
-    if (trip?.status !== "awaiting_rider_checkout") return;
+    if (trip?.status !== "awaiting_rider_checkout") {
+      checkoutTripSyncKeyRef.current = "";
+      return;
+    }
+    const fareTotal = trip.fareEstimate?.total;
+    const key = `${trip._id}|${trip.riderTipAmountCents ?? ""}|${fareTotal ?? ""}`;
+    if (checkoutTripSyncKeyRef.current === key) return;
+    checkoutTripSyncKeyRef.current = key;
+
     const existing =
       trip.riderTipAmountCents != null && Number.isFinite(Number(trip.riderTipAmountCents))
         ? Math.round(Number(trip.riderTipAmountCents))
         : 0;
-    setCheckoutTipCents(existing);
-  }, [trip?.status, trip?._id, trip?.riderTipAmountCents]);
+    const fareUsd = tripQuotedFareUsd(trip);
+    const fareCents =
+      Number.isFinite(fareUsd) && fareUsd > 0 ? Math.round(fareUsd * 100) : 0;
+    const maxTip = maxTipCentsForQuotedFareClient(fareCents);
+    const clamped = Math.min(Math.max(0, existing), maxTip);
+    const chips = buildCheckoutTipPresetChips(fareUsd, fareCents, maxTip);
+    const match = chips.find((c) => c.cents === clamped);
+    setCheckoutTipCents(clamped);
+    if (match) {
+      setCheckoutTipCustom(false);
+      setCheckoutSuggestedExpanded(false);
+      setCheckoutCustomTipText("");
+    } else {
+      setCheckoutTipCustom(true);
+      setCheckoutSuggestedExpanded(false);
+      setCheckoutCustomTipText(clamped > 0 ? (clamped / 100).toFixed(2) : "");
+    }
+  }, [trip?.status, trip?._id, trip?.riderTipAmountCents, trip?.fareEstimate?.total]);
+
+  useEffect(() => {
+    if (!checkoutTipCustom) setCheckoutSuggestedExpanded(false);
+  }, [checkoutTipCustom]);
+
+  const checkoutFareUsd = useMemo(() => tripQuotedFareUsd(trip), [trip?.fareEstimate?.total]);
+  const checkoutFareCents = useMemo(
+    () =>
+      Number.isFinite(checkoutFareUsd) && checkoutFareUsd > 0
+        ? Math.round(checkoutFareUsd * 100)
+        : 0,
+    [checkoutFareUsd]
+  );
+  const checkoutMaxTipCents = useMemo(
+    () => maxTipCentsForQuotedFareClient(checkoutFareCents),
+    [checkoutFareCents]
+  );
+  const checkoutTipPresetChips = useMemo(
+    () => buildCheckoutTipPresetChips(checkoutFareUsd, checkoutFareCents, checkoutMaxTipCents),
+    [checkoutFareUsd, checkoutFareCents, checkoutMaxTipCents]
+  );
+
+  const checkoutTipModeHint = useMemo(() => {
+    if (!Number.isFinite(checkoutFareUsd)) {
+      return "Using fixed suggestions. Enter a custom tip if you prefer.";
+    }
+    if (checkoutFareUsd < RIDER_CHECKOUT_TIP_FARE_THRESHOLD_USD) {
+      return `Quoted fare under $${RIDER_CHECKOUT_TIP_FARE_THRESHOLD_USD} — fixed tip suggestions.`;
+    }
+    return `Quoted fare $${RIDER_CHECKOUT_TIP_FARE_THRESHOLD_USD}+ — suggestions are 10%, 15%, and 20% of fare.`;
+  }, [checkoutFareUsd]);
 
   const finalizeTripCheckout = useCallback(async () => {
     if (!token || !trip?._id || trip.status !== "awaiting_rider_checkout") return;
+    const fareUsd = tripQuotedFareUsd(trip);
+    const fareCents =
+      Number.isFinite(fareUsd) && fareUsd > 0 ? Math.round(fareUsd * 100) : 0;
+    const maxTip = maxTipCentsForQuotedFareClient(fareCents);
+    let tipCents;
+    if (checkoutTipCustom) {
+      const trimmed = checkoutCustomTipText.trim();
+      if (trimmed === "") {
+        tipCents = 0;
+      } else {
+        const p = parseTipDollarInputToCents(checkoutCustomTipText, maxTip);
+        if (p === null) {
+          Alert.alert("Tip", "Enter a valid dollar amount, or pick a suggestion.");
+          return;
+        }
+        tipCents = p;
+      }
+    } else {
+      tipCents = checkoutTipCents;
+    }
+    tipCents = Math.min(maxTip, Math.max(0, Math.round(tipCents)));
+
     setCheckoutFinalizing(true);
     try {
       const data = await api(`/trips/${trip._id}/finalize-checkout`, {
         method: "POST",
         token,
-        body: { tipAmountCents: checkoutTipCents },
+        body: { tipAmountCents: tipCents },
       });
       if (data?.trip) applyIncomingTrip(data.trip);
     } catch (e) {
@@ -906,7 +1046,14 @@ export default function App() {
     } finally {
       setCheckoutFinalizing(false);
     }
-  }, [token, trip?._id, trip?.status, checkoutTipCents, applyIncomingTrip]);
+  }, [
+    token,
+    trip,
+    checkoutTipCustom,
+    checkoutCustomTipText,
+    checkoutTipCents,
+    applyIncomingTrip,
+  ]);
 
   const checkoutModalVisible = trip?.status === "awaiting_rider_checkout";
 
@@ -2803,36 +2950,122 @@ export default function App() {
         <View style={styles.checkoutModalRoot}>
           <View style={styles.checkoutModalDim} pointerEvents="none" />
           <View style={styles.checkoutModalCard}>
-            <Text style={styles.checkoutModalTitle}>Ride complete</Text>
-            <Text style={styles.checkoutModalSubtitle}>
-              Choose a tip and confirm — your card is charged once for fare plus tip.
-            </Text>
-            {checkoutDeadlineHint ? (
-              <Text style={styles.checkoutModalDeadline}>{checkoutDeadlineHint}</Text>
-            ) : null}
-            <Text style={styles.checkoutTipTitle}>Tip</Text>
-            <View style={styles.checkoutTipChips}>
-              {RIDER_CHECKOUT_TIP_OPTIONS.map((opt) => (
-                <Pressable
-                  key={opt.label}
-                  style={[
-                    styles.checkoutTipChip,
-                    checkoutTipCents === opt.cents && styles.checkoutTipChipSelected,
-                  ]}
-                  onPress={() => setCheckoutTipCents(opt.cents)}
-                  disabled={checkoutFinalizing}
-                >
-                  <Text
-                    style={[
-                      styles.checkoutTipChipText,
-                      checkoutTipCents === opt.cents && styles.checkoutTipChipTextSelected,
-                    ]}
+            <ScrollView
+              keyboardShouldPersistTaps="handled"
+              showsVerticalScrollIndicator={false}
+              bounces={false}
+              contentContainerStyle={styles.checkoutModalScrollContent}
+            >
+              <Text style={styles.checkoutModalTitle}>Ride complete</Text>
+              <Text style={styles.checkoutModalSubtitle}>
+                Choose a tip and confirm — your card is charged once for fare plus tip.
+              </Text>
+              {checkoutDeadlineHint ? (
+                <Text style={styles.checkoutModalDeadline}>{checkoutDeadlineHint}</Text>
+              ) : null}
+              <Text style={styles.checkoutTipTitle}>Tip</Text>
+              <Text style={styles.checkoutTipModeHint}>{checkoutTipModeHint}</Text>
+              {checkoutTipCustom ? (
+                <>
+                  <View style={styles.checkoutCustomTipBlock}>
+                    <Text style={styles.checkoutCustomTipLabel}>Custom amount (USD)</Text>
+                    <TextInput
+                      style={styles.checkoutCustomTipInput}
+                      value={checkoutCustomTipText}
+                      onChangeText={(text) => {
+                        setCheckoutCustomTipText(text);
+                        const parsed = parseTipDollarInputToCents(text, checkoutMaxTipCents);
+                        if (parsed !== null) setCheckoutTipCents(parsed);
+                      }}
+                      keyboardType="decimal-pad"
+                      placeholder="0.00"
+                      editable={!checkoutFinalizing}
+                    />
+                  </View>
+                  {!checkoutSuggestedExpanded ? (
+                    <Pressable
+                      style={styles.checkoutSuggestedCollapsed}
+                      onPress={() => setCheckoutSuggestedExpanded(true)}
+                      disabled={checkoutFinalizing}
+                    >
+                      <Text style={styles.checkoutSuggestedCollapsedText}>Suggested tips</Text>
+                      <Ionicons name="chevron-down" size={18} color="#64748b" />
+                    </Pressable>
+                  ) : (
+                    <>
+                      <Pressable
+                        style={styles.checkoutSuggestedHideRow}
+                        onPress={() => setCheckoutSuggestedExpanded(false)}
+                        disabled={checkoutFinalizing}
+                      >
+                        <Text style={styles.checkoutSuggestedHideText}>Hide suggested tips</Text>
+                        <Ionicons name="chevron-up" size={18} color="#64748b" />
+                      </Pressable>
+                      <View style={styles.checkoutTipChips}>
+                        {checkoutTipPresetChips.map((opt) => (
+                          <Pressable
+                            key={opt.key}
+                            style={[styles.checkoutTipChip, styles.checkoutTipChipCompact]}
+                            onPress={() => {
+                              setCheckoutTipCustom(false);
+                              setCheckoutSuggestedExpanded(false);
+                              setCheckoutCustomTipText("");
+                              setCheckoutTipCents(opt.cents);
+                            }}
+                            disabled={checkoutFinalizing}
+                          >
+                            <Text style={styles.checkoutTipChipText}>{opt.label}</Text>
+                          </Pressable>
+                        ))}
+                      </View>
+                    </>
+                  )}
+                </>
+              ) : (
+                <View style={styles.checkoutTipChips}>
+                  {checkoutTipPresetChips.map((opt) => (
+                    <Pressable
+                      key={opt.key}
+                      style={[
+                        styles.checkoutTipChip,
+                        checkoutTipCents === opt.cents && styles.checkoutTipChipSelected,
+                      ]}
+                      onPress={() => {
+                        setCheckoutTipCustom(false);
+                        setCheckoutCustomTipText("");
+                        setCheckoutTipCents(opt.cents);
+                      }}
+                      disabled={checkoutFinalizing}
+                    >
+                      <Text
+                        style={[
+                          styles.checkoutTipChipText,
+                          checkoutTipCents === opt.cents && styles.checkoutTipChipTextSelected,
+                        ]}
+                      >
+                        {opt.label}
+                      </Text>
+                    </Pressable>
+                  ))}
+                  <Pressable
+                    style={styles.checkoutTipChip}
+                    onPress={() => {
+                      setCheckoutTipCustom(true);
+                      setCheckoutSuggestedExpanded(false);
+                      setCheckoutCustomTipText(
+                        checkoutTipCents > 0 ? (checkoutTipCents / 100).toFixed(2) : ""
+                      );
+                    }}
+                    disabled={checkoutFinalizing}
                   >
-                    {opt.label}
-                  </Text>
-                </Pressable>
-              ))}
-            </View>
+                    <Text style={styles.checkoutTipChipText}>Custom</Text>
+                  </Pressable>
+                </View>
+              )}
+              <Text style={styles.checkoutMaxTipNote}>
+                Max tip for this ride: ${(checkoutMaxTipCents / 100).toFixed(2)}
+              </Text>
+            </ScrollView>
             <Pressable
               style={[
                 styles.checkoutConfirmBtn,
@@ -4622,8 +4855,58 @@ const styles = StyleSheet.create({
     borderRadius: 10,
     overflow: "hidden",
   },
+  checkoutModalScrollContent: { flexGrow: 0, paddingBottom: 4 },
   checkoutModalClearRide: { alignSelf: "center", marginTop: 14 },
   checkoutTipTitle: { fontSize: 17, ...pj.sb, color: "#0f172a", marginTop: 18 },
+  checkoutTipModeHint: {
+    fontSize: 13,
+    ...pj.r,
+    color: "#64748b",
+    marginTop: 6,
+    lineHeight: 18,
+  },
+  checkoutCustomTipBlock: { marginTop: 4, marginBottom: 8 },
+  checkoutCustomTipLabel: { fontSize: 14, ...pj.m, color: "#334155", marginBottom: 6 },
+  checkoutCustomTipInput: {
+    borderWidth: 1,
+    borderColor: "#cbd5e1",
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: Platform.OS === "ios" ? 12 : 8,
+    fontSize: 17,
+    ...pj.r,
+    color: "#0f172a",
+    backgroundColor: "#f8fafc",
+  },
+  checkoutMaxTipNote: {
+    fontSize: 12,
+    ...pj.r,
+    color: "#94a3b8",
+    marginTop: 10,
+  },
+  checkoutSuggestedCollapsed: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    marginTop: 4,
+    marginBottom: 4,
+    backgroundColor: "#f1f5f9",
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: "#e2e8f0",
+  },
+  checkoutSuggestedCollapsedText: { fontSize: 14, ...pj.m, color: "#475569" },
+  checkoutSuggestedHideRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    paddingVertical: 6,
+    marginTop: 4,
+    marginBottom: 4,
+  },
+  checkoutSuggestedHideText: { fontSize: 13, ...pj.m, color: "#64748b" },
   checkoutTipChips: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginBottom: 16 },
   checkoutTipChip: {
     paddingVertical: 10,
@@ -4634,6 +4917,7 @@ const styles = StyleSheet.create({
     backgroundColor: "#f8fafc",
   },
   checkoutTipChipSelected: { borderColor: "#0f172a", backgroundColor: "#0f172a" },
+  checkoutTipChipCompact: { paddingVertical: 8, paddingHorizontal: 12 },
   checkoutTipChipText: { fontSize: 14, ...pj.m, color: "#334155" },
   checkoutTipChipTextSelected: { color: "#ffffff" },
   checkoutConfirmBtn: {
