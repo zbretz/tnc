@@ -32,12 +32,22 @@ function navigationInitErrorMessage(code) {
 /**
  * Full-screen in-app turn-by-turn (Google Navigation SDK).
  * Requires {@link NavigationProvider} above the tree (see index.native.js).
+ *
+ * Arrival handling:
+ * - Manual: driver taps "Arrived" (stops guidance, then {@link onArrived} and {@link onClose}).
+ * - Automatic: SDK {@link NavigationCallbacks.onArrival} when the vehicle reaches the final waypoint.
+ * - Alternative not wired here: distance-to-destination in {@link onLocationChanged} (custom geofence).
+ *
+ * @param {{ onArrived?: (detail: { source: 'manual' | 'sdk' }) => void }} props
  */
-export default function DriverInAppNavigationModal({ visible, onClose, destinationTitle, lat, lng }) {
+export default function DriverInAppNavigationModal({ visible, onClose, onArrived, destinationTitle, lat, lng }) {
   const { navigationController, addListeners, removeListeners } = useNavigation();
   const guidanceStartedRef = useRef(false);
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
+  const onArrivedRef = useRef(onArrived);
+  onArrivedRef.current = onArrived;
+  const arrivalFinalizingRef = useRef(false);
   /** Wait for native Navigation map surface before init/session so views can attach (non-zero bounds). */
   const [navMapSurfaceReady, setNavMapSurfaceReady] = useState(false);
 
@@ -79,10 +89,23 @@ export default function DriverInAppNavigationModal({ visible, onClose, destinati
     onCloseRef.current();
   }, [stopGuidanceOnly]);
 
+  const finalizeArrival = useCallback(async (source) => {
+    if (arrivalFinalizingRef.current) return;
+    arrivalFinalizingRef.current = true;
+    try {
+      await stopGuidanceOnly();
+      onArrivedRef.current?.({ source });
+    } finally {
+      onCloseRef.current();
+      arrivalFinalizingRef.current = false;
+    }
+  }, [stopGuidanceOnly]);
+
   useEffect(() => {
     if (!visible) {
       setNavMapSurfaceReady(false);
       navigationViewControllerRef.current = null;
+      arrivalFinalizingRef.current = false;
     }
   }, [visible]);
 
@@ -132,6 +155,10 @@ export default function DriverInAppNavigationModal({ visible, onClose, destinati
       if (extraListeners.onRouteStatusResult) {
         removeListeners({ onRouteStatusResult: extraListeners.onRouteStatusResult });
         delete extraListeners.onRouteStatusResult;
+      }
+      if (extraListeners.onArrival) {
+        removeListeners({ onArrival: extraListeners.onArrival });
+        delete extraListeners.onArrival;
       }
     };
 
@@ -265,6 +292,16 @@ export default function DriverInAppNavigationModal({ visible, onClose, destinati
         await navigationController.startGuidance();
         if (cancelled) return;
         guidanceStartedRef.current = true;
+
+        const onArrival = (event) => {
+          if (cancelled) return;
+          if (event?.isFinalDestination === false) return;
+          removeListeners({ onArrival });
+          delete extraListeners.onArrival;
+          void finalizeArrival("sdk");
+        };
+        extraListeners.onArrival = onArrival;
+        addListeners({ onArrival });
       } catch (e) {
         detachAllNavigationListeners();
         if (!cancelled) fail(e?.message ? String(e.message) : String(e));
@@ -290,6 +327,7 @@ export default function DriverInAppNavigationModal({ visible, onClose, destinati
     addListeners,
     removeListeners,
     stopGuidanceOnly,
+    finalizeArrival,
   ]);
 
   if (!visible) return null;
@@ -305,6 +343,14 @@ export default function DriverInAppNavigationModal({ visible, onClose, destinati
             accessibilityLabel="Close navigation"
           >
             <Text style={styles.closeBtnText}>Close</Text>
+          </Pressable>
+          <Pressable
+            style={styles.arrivedBtn}
+            onPress={() => void finalizeArrival("manual")}
+            accessibilityRole="button"
+            accessibilityLabel="Mark arrived at destination"
+          >
+            <Text style={styles.arrivedBtnText}>Arrived</Text>
           </Pressable>
         </View>
         <NavigationView
@@ -322,18 +368,27 @@ export default function DriverInAppNavigationModal({ visible, onClose, destinati
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: "#000" },
   chrome: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
     paddingTop: 52,
     paddingHorizontal: 12,
     paddingBottom: 8,
     backgroundColor: "#0f172a",
   },
   closeBtn: {
-    alignSelf: "flex-start",
     paddingVertical: 10,
     paddingHorizontal: 14,
     backgroundColor: "#334155",
     borderRadius: 10,
   },
   closeBtnText: { fontSize: 16, ...pj.sb, color: "#fff" },
+  arrivedBtn: {
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+    backgroundColor: "#15803d",
+    borderRadius: 10,
+  },
+  arrivedBtnText: { fontSize: 16, ...pj.sb, color: "#fff" },
   navView: { flex: 1 },
 });
