@@ -293,6 +293,15 @@ function maskPhoneForDisplay(raw) {
 
 const STRIPE_RETURN_URL = "tnc-rider://stripe-redirect";
 
+function formatPaymentCardBrand(brand) {
+  if (!brand || typeof brand !== "string") return "Card";
+  return brand
+    .replace(/_/g, " ")
+    .trim()
+    .toLowerCase()
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
 async function api(path, opts = {}) {
   const { method = "GET", body, token } = opts;
   const base = getApiUrl().replace(/\/$/, "");
@@ -678,10 +687,16 @@ export default function App() {
   const [keyboardInset, setKeyboardInset] = useState(0);
 
   const [addCardModalOpen, setAddCardModalOpen] = useState(false);
+  const [addCardModalHeading, setAddCardModalHeading] = useState("Add card");
   const [addCardFieldKey, setAddCardFieldKey] = useState(0);
   const [addCardFieldComplete, setAddCardFieldComplete] = useState(false);
   const [addCardSaving, setAddCardSaving] = useState(false);
   const addCardModalRef = useRef({ resolve: /** @type {((v: boolean) => void) | null} */ (null), quietSuccess: false });
+
+  const [paymentMethodsHubOpen, setPaymentMethodsHubOpen] = useState(false);
+  const [paymentMethodsHubLoading, setPaymentMethodsHubLoading] = useState(false);
+  const [paymentMethodsHubCfg, setPaymentMethodsHubCfg] = useState(null);
+  const [paymentMethodsHubError, setPaymentMethodsHubError] = useState(null);
 
   const { confirmSetupIntent, handleNextActionForSetup, resetPaymentSheetCustomer } = useStripe();
 
@@ -741,6 +756,31 @@ export default function App() {
       if (addressBlurTimerRef.current) clearTimeout(addressBlurTimerRef.current);
     };
   }, []);
+
+  useEffect(() => {
+    if (!paymentMethodsHubOpen || !token) return undefined;
+    let cancelled = false;
+    setPaymentMethodsHubCfg(null);
+    setPaymentMethodsHubError(null);
+    setPaymentMethodsHubLoading(true);
+    (async () => {
+      try {
+        const cfg = await api("/payments/config", { token });
+        if (!cancelled) setPaymentMethodsHubCfg(cfg);
+      } catch (e) {
+        if (!cancelled) {
+          setPaymentMethodsHubError(
+            e?.message ? String(e.message) : "Could not load payment settings."
+          );
+        }
+      } finally {
+        if (!cancelled) setPaymentMethodsHubLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [paymentMethodsHubOpen, token]);
 
   /** One HTTP read for login screen + first paint; logged-in riders also get pushes over Socket.io. */
   useEffect(() => {
@@ -1421,6 +1461,7 @@ export default function App() {
     addCardModalRef.current.resolve = null;
     addCardModalRef.current.quietSuccess = false;
     setAddCardModalOpen(false);
+    setAddCardModalHeading("Add card");
     res?.(false);
   }, [addCardSaving]);
 
@@ -1467,6 +1508,7 @@ export default function App() {
       addCardModalRef.current.resolve = null;
       addCardModalRef.current.quietSuccess = false;
       setAddCardModalOpen(false);
+      setAddCardModalHeading("Add card");
       res?.(true);
     } catch (e) {
       Alert.alert("Could not save card", e?.message ? String(e.message) : String(e));
@@ -1475,10 +1517,10 @@ export default function App() {
     }
   }, [token, confirmSetupIntent, handleNextActionForSetup]);
 
-  /** @param {{ quietSuccess?: boolean, manageBusy?: boolean }} [opts] */
+  /** @param {{ quietSuccess?: boolean, manageBusy?: boolean, cardHeading?: string }} [opts] */
   const saveCardWithPaymentSheet = useCallback(
     async (opts = {}) => {
-      const { quietSuccess = false, manageBusy = true } = opts;
+      const { quietSuccess = false, manageBusy = true, cardHeading = "Add card" } = opts;
       if (Platform.OS === "web") {
         Alert.alert("Payment methods", "Add a card in the iOS or Android app.");
         return false;
@@ -1504,6 +1546,7 @@ export default function App() {
         }
         return await new Promise((resolve) => {
           addCardModalRef.current = { resolve, quietSuccess };
+          setAddCardModalHeading(cardHeading);
           setAddCardFieldComplete(false);
           setAddCardFieldKey((k) => k + 1);
           setAddCardModalOpen(true);
@@ -1518,10 +1561,36 @@ export default function App() {
     [token]
   );
 
-  const openPaymentMethodSheet = useCallback(
-    () => saveCardWithPaymentSheet({ quietSuccess: false, manageBusy: true }),
-    [saveCardWithPaymentSheet]
-  );
+  const openPaymentMethodsHub = useCallback(() => {
+    if (Platform.OS === "web") {
+      Alert.alert("Payment methods", "Add a card in the iOS or Android app.");
+      return;
+    }
+    if (!token) {
+      Alert.alert("Sign in required", "Log in to manage payment methods.");
+      return;
+    }
+    const pk = getStripePublishableKey().trim();
+    if (!pk) {
+      Alert.alert(
+        "Stripe",
+        "Set EXPO_PUBLIC_STRIPE_PUBLISHABLE_KEY in the project .env, restart Expo, and rebuild the native app."
+      );
+      return;
+    }
+    setPaymentMethodsHubOpen(true);
+  }, [token]);
+
+  const startAddCardFromHub = useCallback(() => {
+    const summary = paymentMethodsHubCfg?.defaultPaymentMethodSummary;
+    const hasLast4 = typeof summary?.last4 === "string" && summary.last4.length > 0;
+    const replace = hasLast4 || Boolean(paymentMethodsHubCfg?.hasDefaultPaymentMethod);
+    const heading = replace ? "Replace card" : "Add card";
+    setPaymentMethodsHubOpen(false);
+    requestAnimationFrame(() => {
+      void saveCardWithPaymentSheet({ quietSuccess: false, manageBusy: true, cardHeading: heading });
+    });
+  }, [saveCardWithPaymentSheet, paymentMethodsHubCfg]);
 
   const centerOnMe = async () => {
     const { status } = await Location.requestForegroundPermissionsAsync();
@@ -2536,7 +2605,7 @@ export default function App() {
               accessibilityLabel="Close add card"
             />
             <View style={styles.addCardModalSheet}>
-              <Text style={styles.addCardModalTitle}>Add card</Text>
+              <Text style={styles.addCardModalTitle}>{addCardModalHeading}</Text>
               <Text style={styles.addCardModalSub}>
                 Used for ride charges. Card details are sent to Stripe only, not to TNC servers.
               </Text>
@@ -2580,6 +2649,80 @@ export default function App() {
           </KeyboardAvoidingView>
         </Modal>
       ) : null}
+      {Platform.OS !== "web" ? (
+        <Modal
+          visible={paymentMethodsHubOpen}
+          animationType="fade"
+          transparent
+          onRequestClose={() => setPaymentMethodsHubOpen(false)}
+        >
+          <View style={styles.paymentHubRoot}>
+            <Pressable
+              style={styles.addCardModalBackdrop}
+              onPress={() => setPaymentMethodsHubOpen(false)}
+              accessibilityLabel="Close payment methods"
+            />
+            <View style={styles.paymentHubSheet}>
+              <Text style={styles.addCardModalTitle}>Payment methods</Text>
+              {paymentMethodsHubLoading ? (
+                <ActivityIndicator style={styles.paymentHubSpinner} color="#334155" />
+              ) : paymentMethodsHubError ? (
+                <>
+                  <Text style={styles.paymentHubBody}>{paymentMethodsHubError}</Text>
+                  <Pressable
+                    style={styles.addCardModalSecondary}
+                    onPress={() => setPaymentMethodsHubOpen(false)}
+                  >
+                    <Text style={styles.addCardModalSecondaryText}>Close</Text>
+                  </Pressable>
+                </>
+              ) : paymentMethodsHubCfg && !paymentMethodsHubCfg.paymentsEnabled ? (
+                <>
+                  <Text style={styles.paymentHubBody}>
+                    Payments are not enabled on the server yet. Ask your admin to set STRIPE_SECRET_KEY in
+                    apps/api/.env.
+                  </Text>
+                  <Pressable
+                    style={styles.addCardModalSecondary}
+                    onPress={() => setPaymentMethodsHubOpen(false)}
+                  >
+                    <Text style={styles.addCardModalSecondaryText}>Close</Text>
+                  </Pressable>
+                </>
+              ) : (
+                <>
+                  <Text style={styles.paymentHubBody}>
+                    {paymentMethodsHubCfg?.defaultPaymentMethodSummary?.last4
+                      ? `On file: ${formatPaymentCardBrand(
+                          paymentMethodsHubCfg.defaultPaymentMethodSummary.brand
+                        )} •••• ${paymentMethodsHubCfg.defaultPaymentMethodSummary.last4}`
+                      : paymentMethodsHubCfg?.hasDefaultPaymentMethod
+                        ? "You have a saved card on file."
+                        : "No card on file yet."}
+                  </Text>
+                  <Text style={styles.paymentHubHint}>
+                    When billing is on, completed rides are charged to this saved card.
+                  </Text>
+                  <Pressable style={styles.addCardModalPrimary} onPress={() => void startAddCardFromHub()}>
+                    <Text style={styles.addCardModalPrimaryText}>
+                      {paymentMethodsHubCfg?.defaultPaymentMethodSummary?.last4 ||
+                      paymentMethodsHubCfg?.hasDefaultPaymentMethod
+                        ? "Replace card"
+                        : "Add card"}
+                    </Text>
+                  </Pressable>
+                  <Pressable
+                    style={styles.addCardModalSecondary}
+                    onPress={() => setPaymentMethodsHubOpen(false)}
+                  >
+                    <Text style={styles.addCardModalSecondaryText}>Close</Text>
+                  </Pressable>
+                </>
+              )}
+            </View>
+          </View>
+        </Modal>
+      ) : null}
       {showRidersClosedGate ? (
         <View style={styles.ridersClosedLayer} pointerEvents="box-none">
           <View style={styles.ridersClosedCard} pointerEvents="auto">
@@ -2608,7 +2751,7 @@ export default function App() {
         onPress={() =>
           Alert.alert("Account", undefined, [
             { text: "Cancel", style: "cancel" },
-            { text: "Payment methods", onPress: () => void openPaymentMethodSheet() },
+            { text: "Payment methods", onPress: () => void openPaymentMethodsHub() },
             { text: "Log out", style: "destructive", onPress: () => void logout() },
           ])
         }
@@ -4260,6 +4403,22 @@ const styles = StyleSheet.create({
     marginTop: 4,
   },
   addCardModalSecondaryText: { fontSize: 16, ...pj.m, color: "#475569" },
+  paymentHubRoot: {
+    flex: 1,
+    justifyContent: "flex-end",
+    backgroundColor: "rgba(15, 23, 42, 0.45)",
+  },
+  paymentHubSheet: {
+    backgroundColor: "#fff",
+    borderTopLeftRadius: 16,
+    borderTopRightRadius: 16,
+    paddingHorizontal: 20,
+    paddingTop: 20,
+    paddingBottom: Platform.OS === "ios" ? 28 : 20,
+  },
+  paymentHubSpinner: { marginVertical: 28 },
+  paymentHubBody: { fontSize: 16, ...pj.m, color: "#334155", marginTop: 8, lineHeight: 22 },
+  paymentHubHint: { fontSize: 14, ...pj.r, color: "#64748b", marginTop: 12, marginBottom: 20, lineHeight: 20 },
 });
 
 function BookRideTravelTimeRow({ styles, farePreview }) {

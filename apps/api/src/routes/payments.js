@@ -24,11 +24,31 @@ paymentsRouter.get("/config", authMiddleware, requireRole("rider"), async (req, 
   try {
     const user = await User.findById(req.userId).select("stripeDefaultPaymentMethodId").lean().exec();
     const hasDefaultPaymentMethod = Boolean(user?.stripeDefaultPaymentMethodId?.trim());
+    let defaultPaymentMethodSummary = null;
+    const pmId = user?.stripeDefaultPaymentMethodId?.trim();
+    if (pmId && stripeEnabled()) {
+      try {
+        const stripe = getStripe();
+        if (stripe) {
+          const pm = await stripe.paymentMethods.retrieve(pmId);
+          if (pm.type === "card" && pm.card) {
+            const rawBrand = pm.card.display_brand || pm.card.brand || "card";
+            defaultPaymentMethodSummary = {
+              brand: typeof rawBrand === "string" ? rawBrand : "card",
+              last4: typeof pm.card.last4 === "string" ? pm.card.last4 : "",
+            };
+          }
+        }
+      } catch (err) {
+        console.error("GET /payments/config card summary", err);
+      }
+    }
     res.json({
       stripePublishableKey: publishableKeyFromEnv(),
       paymentsEnabled: stripeEnabled(),
       requirePaymentMethodToBook: effectiveRequirePaymentMethodToBook(),
       hasDefaultPaymentMethod,
+      defaultPaymentMethodSummary,
     });
   } catch (e) {
     console.error("GET /payments/config", e);
