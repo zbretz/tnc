@@ -14,3 +14,9 @@ export function getGoogleGeocodingApiKey() {
 export function getGooglePlacesApiKey() {
   return getGoogleGeocodingApiKey();
 }
+
+/** Stripe publishable key (`pk_test_…` / `pk_live_…`); set `EXPO_PUBLIC_STRIPE_PUBLISHABLE_KEY` in `.env`. */
+export function getStripePublishableKey() {
+  const key = Constants.expoConfig?.extra?.stripePublishableKey;
+  return typeof key === "string" && key.length > 0 ? key : "";
+}

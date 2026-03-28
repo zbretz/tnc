@@ -7,10 +7,16 @@ const googleMapsApiKey =
     ? process.env.GOOGLE_MAPS_API_KEY.trim()
     : undefined;
 
+const stripePublishableKey =
+  typeof process.env.EXPO_PUBLIC_STRIPE_PUBLISHABLE_KEY === "string"
+    ? process.env.EXPO_PUBLIC_STRIPE_PUBLISHABLE_KEY.trim()
+    : "";
+
 /** @type {import('expo/config').ExpoConfig} */
 module.exports = {
   name: "TNC Rider",
   slug: "tnc-rider",
+  scheme: "tnc-rider",
   version: "1.0.0",
   /** Reanimated 4 / bottom-sheet require the new architecture in custom dev builds; Expo Go already matches SDK 54. */
   newArchEnabled: true,
@@ -54,6 +60,13 @@ module.exports = {
   plugins: [
     "expo-font",
     [
+      "@stripe/stripe-react-native",
+      {
+        merchantIdentifier: "",
+        enableGooglePay: false,
+      },
+    ],
+    [
       "expo-location",
       {
         locationWhenInUsePermission:
@@ -64,5 +77,6 @@ module.exports = {
   extra: {
     apiUrl: process.env.EXPO_PUBLIC_API_URL || "http://10.0.0.135:3000",
     googleGeocodingApiKey: process.env.EXPO_PUBLIC_GOOGLE_GEOCODING_API_KEY || "",
+    stripePublishableKey,
   },
 };

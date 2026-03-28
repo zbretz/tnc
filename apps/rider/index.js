@@ -3,6 +3,8 @@ import { registerRootComponent } from "expo";
 import { useEffect, useState } from "react";
 import { ActivityIndicator, View } from "react-native";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
+import { StripeProvider } from "@stripe/stripe-react-native";
+import { getStripePublishableKey } from "./lib/config";
 
 /**
  * Do not import react-native-reanimated here. If it throws during the entry module load, React Native
@@ -29,10 +31,14 @@ function Root() {
     };
   }, []);
 
+  const stripePk = getStripePublishableKey();
+
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
       {AppComponent ? (
-        <AppComponent />
+        <StripeProvider publishableKey={stripePk} urlScheme="tnc-rider">
+          <AppComponent />
+        </StripeProvider>
       ) : (
         <View style={{ flex: 1, justifyContent: "center", alignItems: "center", backgroundColor: "#fff" }}>
           <ActivityIndicator size="large" color="#2563eb" />

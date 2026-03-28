@@ -34,7 +34,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import { io } from "socket.io-client";
 import { StatusBar } from "expo-status-bar";
 import { Ionicons } from "@expo/vector-icons";
-import { getApiUrl, getGoogleGeocodingApiKey, getGooglePlacesApiKey } from "./lib/config";
+import { getApiUrl, getGoogleGeocodingApiKey, getGooglePlacesApiKey, getStripePublishableKey } from "./lib/config";
 import BottomSheet, { BottomSheetScrollView, BottomSheetTextInput } from "@gorhom/bottom-sheet";
 
 SplashScreen.preventAutoHideAsync().catch(() => {});
@@ -1397,6 +1397,25 @@ export default function App() {
     socketRef.current?.disconnect();
   };
 
+  /** Placeholder until API SetupIntent + Payment Sheet are wired (incremental payments work). */
+  const onPaymentMethodsInfo = useCallback(() => {
+    if (Platform.OS === "web") {
+      Alert.alert("Payment methods", "Add a card in the iOS or Android app.");
+      return;
+    }
+    if (!getStripePublishableKey().trim()) {
+      Alert.alert(
+        "Stripe",
+        "Set EXPO_PUBLIC_STRIPE_PUBLISHABLE_KEY in the project .env (test or live publishable key), then restart Expo and rebuild the native app (expo run:ios / prebuild)."
+      );
+      return;
+    }
+    Alert.alert(
+      "Payment methods",
+      "Stripe native SDK is enabled. Next: add an API route that returns a SetupIntent client secret, then open Payment Sheet from here."
+    );
+  }, []);
+
   const centerOnMe = async () => {
     const { status } = await Location.requestForegroundPermissionsAsync();
     if (status !== "granted") {
@@ -2408,6 +2427,7 @@ export default function App() {
         onPress={() =>
           Alert.alert("Account", undefined, [
             { text: "Cancel", style: "cancel" },
+            { text: "Payment methods", onPress: () => void onPaymentMethodsInfo() },
             { text: "Log out", style: "destructive", onPress: () => void logout() },
           ])
         }
