@@ -61,8 +61,10 @@ function resetChargeFields(trip) {
  * One PaymentIntent for fare + rider tip (off-session). Mutates `trip` charge fields; does not save.
  * @param {import("mongoose").Document} trip
  * @param {import("mongoose").Document} rider
+ * @param {{ retry?: boolean }} [options] — `retry: true` uses a fresh idempotency key (after a failed / no-PM attempt).
  */
-export async function applyFareChargeToTrip(trip, rider) {
+export async function applyFareChargeToTrip(trip, rider, options = {}) {
+  const isRetry = options.retry === true;
   const stripe = getStripe();
 
   const rawTip = trip.riderTipAmountCents;
@@ -135,6 +137,10 @@ export async function applyFareChargeToTrip(trip, rider) {
   trip.fareChargeAmountCents = totalChargeCents;
   trip.fareChargeCurrency = currency;
 
+  const idempotencyKey = isRetry
+    ? `tnc-trip-fare-retry-${trip._id}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
+    : `tnc-trip-fare-${trip._id}`;
+
   const pi = await stripe.paymentIntents.create(
     {
       amount: totalChargeCents,
@@ -147,9 +153,10 @@ export async function applyFareChargeToTrip(trip, rider) {
         tncTripId: String(trip._id),
         fareCents: String(fareCents),
         tipCents: String(tipCents),
+        ...(isRetry ? { tncRetry: "1" } : {}),
       },
     },
-    { idempotencyKey: `tnc-trip-fare-${trip._id}` }
+    { idempotencyKey }
   );
 
   trip.stripePaymentIntentId = pi.id;

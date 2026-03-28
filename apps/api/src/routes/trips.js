@@ -20,6 +20,8 @@ import {
 } from "../lib/checkoutAgenda.js";
 import { getStripe, stripeEnabled } from "../lib/stripe.js";
 import { effectiveRequirePaymentMethodToBook } from "../lib/paymentPolicy.js";
+import { reconcileTripFareChargeFromStripe } from "../lib/reconcileTripFareCharge.js";
+import { riderRetryTripFareCharge } from "../lib/retryTripFareCharge.js";
 
 const POPULATE_DRIVER = { path: "driver", select: "-passwordHash" };
 
@@ -585,6 +587,70 @@ export function createTripsRouter(deps) {
       console.error("GET /trips/:id/payment-client-secret", e);
       res.status(500).json({ error: e?.raw?.message || e?.message || "Server error" });
     }
+  });
+
+  /** Rider: refresh trip charge state from Stripe after 3DS / delayed settlement. */
+  r.post("/:id/reconcile-fare-charge", authMiddleware, requireRole("rider"), async (req, res) => {
+    const id = req.params.id;
+    if (!mongoose.isValidObjectId(id)) {
+      res.status(400).json({ error: "Invalid id" });
+      return;
+    }
+    const result = await reconcileTripFareChargeFromStripe(id, req.userId);
+    if (!result.ok) {
+      const err = result.error;
+      if (err === "forbidden") {
+        res.status(403).json({ error: "Forbidden" });
+        return;
+      }
+      if (err === "not_found") {
+        res.status(404).json({ error: "Not found" });
+        return;
+      }
+      if (err === "stripe_disabled" || err === "stripe_unconfigured") {
+        res.status(503).json({ error: "Payments not configured" });
+        return;
+      }
+      if (err === "not_completed" || err === "no_payment_intent") {
+        res.status(400).json({ error: err });
+        return;
+      }
+      res.status(400).json({ error: err || "reconcile_failed" });
+      return;
+    }
+    res.json({ trip: result.trip });
+  });
+
+  /** Rider: new charge attempt after failure, no card, or missing estimate (completed trip only). */
+  r.post("/:id/retry-fare-charge", authMiddleware, requireRole("rider"), async (req, res) => {
+    const id = req.params.id;
+    if (!mongoose.isValidObjectId(id)) {
+      res.status(400).json({ error: "Invalid id" });
+      return;
+    }
+    const result = await riderRetryTripFareCharge(id, req.userId);
+    if (!result.ok) {
+      const err = result.error;
+      if (err === "forbidden") {
+        res.status(403).json({ error: "Forbidden" });
+        return;
+      }
+      if (err === "not_found") {
+        res.status(404).json({ error: "Not found" });
+        return;
+      }
+      if (err === "stripe_disabled") {
+        res.status(503).json({ error: "Payments not configured" });
+        return;
+      }
+      if (err === "not_completed" || err === "not_retryable") {
+        res.status(400).json({ error: err });
+        return;
+      }
+      res.status(400).json({ error: err || "retry_failed" });
+      return;
+    }
+    res.json({ trip: result.trip });
   });
 
   r.patch("/:id/driver-location", authMiddleware, requireRole("driver"), async (req, res) => {

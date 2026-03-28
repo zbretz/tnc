@@ -485,6 +485,61 @@ function formatAddress(parts) {
   return line1 || fallback || null;
 }
 
+/** Server allows POST …/retry-fare-charge for these `fareCharge.status` values. */
+function postCheckoutFareRetryable(status) {
+  return (
+    status === "failed" || status === "skipped_no_payment_method" || status === "skipped_no_estimate"
+  );
+}
+
+/** Ride is over but fare was not settled as success/waived/billing-off (needs message or 3DS). */
+function completedTripNeedsPaymentResolution(trip) {
+  if (!trip || trip.status !== "completed") return false;
+  const s = trip.fareCharge?.status;
+  if (!s) return false;
+  return !["succeeded", "waived", "skipped_stripe_disabled"].includes(s);
+}
+
+function postCheckoutPaymentTitle(trip) {
+  const s = trip?.fareCharge?.status;
+  if (s === "requires_action") return "Confirm payment";
+  if (s === "failed") return "Payment didn’t go through";
+  if (s === "skipped_no_payment_method") return "No saved card";
+  if (s === "skipped_below_minimum") return "Charge below card minimum";
+  if (s === "skipped_no_estimate") return "Couldn’t charge this ride";
+  return "Payment";
+}
+
+function postCheckoutPaymentDetail(trip) {
+  const s = trip?.fareCharge?.status;
+  const err = trip?.fareCharge?.error;
+  if (s === "requires_action") {
+    return "Your bank needs a quick verification for this ride. Tap Continue, then complete the prompt.";
+  }
+  if (s === "failed") {
+    return err ? String(err) : "The card charge failed. You can try again or use a different card in Payment methods.";
+  }
+  if (s === "skipped_no_payment_method") {
+    return "Add a default card in Payment methods, then contact support if you still owe a fare.";
+  }
+  if (s === "skipped_below_minimum") {
+    return "The total was below the card network minimum. No charge was made.";
+  }
+  if (s === "skipped_no_estimate") {
+    return err ? String(err) : "We couldn’t determine the fare to charge.";
+  }
+  return err ? String(err) : "This ride is complete, but billing needs attention.";
+}
+
+function formatFareChargeAmountLine(trip) {
+  const fc = trip?.fareCharge;
+  if (!fc || fc.amountCents == null || !Number.isFinite(Number(fc.amountCents))) return null;
+  const cents = Math.round(Number(fc.amountCents));
+  const c = (fc.currency || "usd").toLowerCase();
+  const prefix = c === "usd" ? "$" : `${c.toUpperCase()} `;
+  return `Amount: ${prefix}${(cents / 100).toFixed(2)}`;
+}
+
 function finiteLatLngObject(p) {
   if (p == null || typeof p !== "object") return null;
   const lat = Number(p.lat);
@@ -792,6 +847,7 @@ export default function App() {
   const [checkoutFinalizing, setCheckoutFinalizing] = useState(false);
   const [checkoutDeadlineTick, setCheckoutDeadlineTick] = useState(0);
   const checkoutTripSyncKeyRef = useRef("");
+  const [postCheckoutPaymentBusy, setPostCheckoutPaymentBusy] = useState(false);
 
   /** Tip picker on active trip (accepted / in_progress) — saved via POST …/rider-tip. */
   const [inTripTipCustom, setInTripTipCustom] = useState(false);
@@ -801,7 +857,7 @@ export default function App() {
   const inTripTipSyncKeyRef = useRef("");
   const inTripTipDebounceRef = useRef(null);
 
-  const { confirmSetupIntent, handleNextActionForSetup, resetPaymentSheetCustomer } = useStripe();
+  const { confirmSetupIntent, handleNextActionForSetup, handleNextAction, resetPaymentSheetCustomer } = useStripe();
 
   /** Full planning reset — same baseline as a fresh “Select pickup” session (used after ride ends + on logout). */
   const resetPlanningToInitialPickup = useCallback(() => {
@@ -944,8 +1000,25 @@ export default function App() {
 
   const applyIncomingTrip = useCallback((nextTrip) => {
     if (!nextTrip) return;
-    if (nextTrip.status === "cancelled" || nextTrip.status === "completed") {
+    if (nextTrip.status === "cancelled") {
       setTripRouteCoords(null);
+      if (tripDockClosingRef.current) return;
+      tripDockClosingRef.current = true;
+      setRideInterstitialReset(true);
+      returnToPlanningAfterTripEnds({ matchTripId: nextTrip._id });
+      return;
+    }
+    if (nextTrip.status === "completed") {
+      setTripRouteCoords(null);
+      if (completedTripNeedsPaymentResolution(nextTrip)) {
+        setTrip((prev) => {
+          if (!prev || String(prev._id) !== String(nextTrip._id)) return nextTrip;
+          const merged = { ...prev, ...nextTrip };
+          if (prev.driverProfile && !nextTrip.driverProfile) merged.driverProfile = prev.driverProfile;
+          return merged;
+        });
+        return;
+      }
       if (tripDockClosingRef.current) return;
       tripDockClosingRef.current = true;
       setRideInterstitialReset(true);
@@ -965,6 +1038,82 @@ export default function App() {
       });
     }
   }, [returnToPlanningAfterTripEnds]);
+
+  const exitPostCheckoutPaymentToPlanning = useCallback(
+    (tripId) => {
+      if (tripDockClosingRef.current) return;
+      tripDockClosingRef.current = true;
+      setRideInterstitialReset(true);
+      returnToPlanningAfterTripEnds({ matchTripId: tripId != null ? String(tripId) : undefined });
+    },
+    [returnToPlanningAfterTripEnds]
+  );
+
+  const reconcileFareChargeAndMaybeExit = useCallback(
+    async (tripIdStr) => {
+      if (!token || !tripIdStr) return;
+      const rec = await api(`/trips/${tripIdStr}/reconcile-fare-charge`, { method: "POST", token });
+      const next = rec?.trip;
+      if (next && !completedTripNeedsPaymentResolution(next)) {
+        exitPostCheckoutPaymentToPlanning(next._id);
+      } else if (next) {
+        applyIncomingTrip(next);
+      }
+    },
+    [token, applyIncomingTrip, exitPostCheckoutPaymentToPlanning]
+  );
+
+  const runPostCheckoutBankVerification = useCallback(async () => {
+    if (!token || !trip?._id || trip.status !== "completed") return;
+    if (Platform.OS === "web") return;
+    setPostCheckoutPaymentBusy(true);
+    try {
+      const secretRes = await api(`/trips/${trip._id}/payment-client-secret`, { token });
+      const clientSecret = secretRes?.clientSecret;
+      if (typeof clientSecret !== "string" || !clientSecret.length) {
+        throw new Error("Could not start bank verification.");
+      }
+      const { error } = await handleNextAction(clientSecret, STRIPE_RETURN_URL);
+      if (error) {
+        throw new Error(error.message || "Verification did not complete.");
+      }
+      await reconcileFareChargeAndMaybeExit(String(trip._id));
+    } catch (e) {
+      Alert.alert("Payment", e?.message ? String(e.message) : String(e));
+    } finally {
+      setPostCheckoutPaymentBusy(false);
+    }
+  }, [token, trip, handleNextAction, reconcileFareChargeAndMaybeExit]);
+
+  const retryPostCheckoutReconcileOnly = useCallback(async () => {
+    if (!token || !trip?._id) return;
+    setPostCheckoutPaymentBusy(true);
+    try {
+      await reconcileFareChargeAndMaybeExit(String(trip._id));
+    } catch (e) {
+      Alert.alert("Payment", e?.message ? String(e.message) : String(e));
+    } finally {
+      setPostCheckoutPaymentBusy(false);
+    }
+  }, [token, trip?._id, reconcileFareChargeAndMaybeExit]);
+
+  const runPostCheckoutFareRetry = useCallback(async () => {
+    if (!token || !trip?._id) return;
+    setPostCheckoutPaymentBusy(true);
+    try {
+      const data = await api(`/trips/${trip._id}/retry-fare-charge`, { method: "POST", token });
+      const next = data?.trip;
+      if (next && !completedTripNeedsPaymentResolution(next)) {
+        exitPostCheckoutPaymentToPlanning(next._id);
+      } else if (next) {
+        applyIncomingTrip(next);
+      }
+    } catch (e) {
+      Alert.alert("Payment", e?.message ? String(e.message) : String(e));
+    } finally {
+      setPostCheckoutPaymentBusy(false);
+    }
+  }, [token, trip?._id, applyIncomingTrip, exitPostCheckoutPaymentToPlanning]);
 
   useEffect(() => {
     if (trip?.status !== "awaiting_rider_checkout") {
@@ -2986,6 +3135,9 @@ export default function App() {
       ? Math.round(Number(trip.riderTipAmountCents))
       : 0;
 
+  const postCheckoutPaymentModalVisible = Boolean(trip && completedTripNeedsPaymentResolution(trip));
+  const postCheckoutFareStatus = trip?.fareCharge?.status;
+
   return (
     <View style={styles.container}>
       <StatusBar style="dark" />
@@ -3150,6 +3302,9 @@ export default function App() {
               <Text style={styles.checkoutModalTitle}>Ride complete</Text>
               <Text style={styles.checkoutModalSubtitle}>
                 Choose a tip and confirm — your card is charged once for fare plus tip.
+              </Text>
+              <Text style={styles.checkoutModalPaymentHint}>
+                If your bank requires it, you’ll verify the charge on the next step after you tap Confirm & pay.
               </Text>
               {checkoutDeadlineHint ? (
                 <Text style={styles.checkoutModalDeadline}>{checkoutDeadlineHint}</Text>
@@ -3387,6 +3542,149 @@ export default function App() {
             >
               <Text style={styles.inTripTipModalDoneText}>Done</Text>
             </Pressable>
+          </View>
+        </View>
+      </Modal>
+      <Modal
+        visible={postCheckoutPaymentModalVisible}
+        animationType="fade"
+        transparent
+        statusBarTranslucent
+        presentationStyle={Platform.OS === "ios" ? "overFullScreen" : undefined}
+        onRequestClose={() => {
+          if (!trip?._id) return;
+          if (postCheckoutFareStatus === "requires_action") {
+            Alert.alert(
+              "Skip verification?",
+              "Your bank still needs you to confirm this payment. You can tap Continue when you’re ready.",
+              [
+                { text: "Keep open", style: "cancel" },
+                {
+                  text: "Return to map",
+                  style: "destructive",
+                  onPress: () => exitPostCheckoutPaymentToPlanning(trip._id),
+                },
+              ]
+            );
+            return;
+          }
+          exitPostCheckoutPaymentToPlanning(trip._id);
+        }}
+      >
+        <View style={styles.checkoutModalRoot}>
+          <View style={styles.checkoutModalDim} pointerEvents="none" />
+          <View style={[styles.checkoutModalCard, styles.postCheckoutPaymentCard]}>
+            <Text style={styles.checkoutModalTitle}>{postCheckoutPaymentTitle(trip)}</Text>
+            <Text style={styles.checkoutModalSubtitle}>{postCheckoutPaymentDetail(trip)}</Text>
+            {formatFareChargeAmountLine(trip) ? (
+              <Text style={styles.postCheckoutAmountLine}>{formatFareChargeAmountLine(trip)}</Text>
+            ) : null}
+            {postCheckoutFareStatus === "requires_action" && Platform.OS === "web" ? (
+              <>
+                <Text style={styles.checkoutTipModeHint}>
+                  Bank verification for this charge isn’t available on web. Open the TNC Rider app on your phone to
+                  finish.
+                </Text>
+                <Pressable
+                  style={[styles.checkoutConfirmBtn, postCheckoutPaymentBusy && styles.addCardModalBtnDisabled]}
+                  disabled={postCheckoutPaymentBusy}
+                  onPress={() => exitPostCheckoutPaymentToPlanning(trip._id)}
+                >
+                  <Text style={styles.checkoutConfirmBtnText}>Return to map</Text>
+                </Pressable>
+              </>
+            ) : null}
+            {postCheckoutFareStatus === "requires_action" && Platform.OS !== "web" ? (
+              <>
+                <Pressable
+                  style={[styles.checkoutConfirmBtn, postCheckoutPaymentBusy && styles.addCardModalBtnDisabled]}
+                  disabled={postCheckoutPaymentBusy}
+                  onPress={() => void runPostCheckoutBankVerification()}
+                >
+                  {postCheckoutPaymentBusy ? (
+                    <ActivityIndicator color="#fff" />
+                  ) : (
+                    <Text style={styles.checkoutConfirmBtnText}>Continue</Text>
+                  )}
+                </Pressable>
+                <Pressable
+                  style={styles.postCheckoutSecondaryBtn}
+                  disabled={postCheckoutPaymentBusy}
+                  onPress={() => {
+                    Alert.alert(
+                      "Skip verification?",
+                      "Your bank still needs you to confirm this payment.",
+                      [
+                        { text: "Cancel", style: "cancel" },
+                        {
+                          text: "Return to map",
+                          style: "destructive",
+                          onPress: () => exitPostCheckoutPaymentToPlanning(trip._id),
+                        },
+                      ]
+                    );
+                  }}
+                >
+                  <Text style={styles.postCheckoutSecondaryBtnText}>Not now</Text>
+                </Pressable>
+              </>
+            ) : null}
+            {postCheckoutFareStatus !== "requires_action" ? (
+              <>
+                {postCheckoutFareRetryable(postCheckoutFareStatus) ? (
+                  <Pressable
+                    style={[styles.checkoutConfirmBtn, postCheckoutPaymentBusy && styles.addCardModalBtnDisabled]}
+                    disabled={postCheckoutPaymentBusy}
+                    onPress={() => void runPostCheckoutFareRetry()}
+                  >
+                    {postCheckoutPaymentBusy ? (
+                      <ActivityIndicator color="#fff" />
+                    ) : (
+                      <Text style={styles.checkoutConfirmBtnText}>Try payment again</Text>
+                    )}
+                  </Pressable>
+                ) : null}
+                {postCheckoutFareStatus === "failed" ||
+                postCheckoutFareStatus === "skipped_no_estimate" ||
+                postCheckoutFareStatus === "skipped_below_minimum" ? (
+                  <Pressable
+                    style={[
+                      styles.checkoutConfirmBtn,
+                      styles.postCheckoutSecondPrimary,
+                      postCheckoutPaymentBusy && styles.addCardModalBtnDisabled,
+                    ]}
+                    disabled={postCheckoutPaymentBusy}
+                    onPress={() => void retryPostCheckoutReconcileOnly()}
+                  >
+                    {postCheckoutPaymentBusy ? (
+                      <ActivityIndicator color="#fff" />
+                    ) : (
+                      <Text style={styles.checkoutConfirmBtnText}>Check payment status</Text>
+                    )}
+                  </Pressable>
+                ) : null}
+                {postCheckoutFareStatus === "skipped_no_payment_method" ? (
+                  <Pressable
+                    style={[
+                      styles.checkoutConfirmBtn,
+                      styles.postCheckoutSecondPrimary,
+                      postCheckoutPaymentBusy && styles.addCardModalBtnDisabled,
+                    ]}
+                    disabled={postCheckoutPaymentBusy}
+                    onPress={() => void openPaymentMethodsHub()}
+                  >
+                    <Text style={styles.checkoutConfirmBtnText}>Payment methods</Text>
+                  </Pressable>
+                ) : null}
+                <Pressable
+                  style={styles.postCheckoutSecondaryBtn}
+                  disabled={postCheckoutPaymentBusy}
+                  onPress={() => exitPostCheckoutPaymentToPlanning(trip._id)}
+                >
+                  <Text style={styles.postCheckoutSecondaryBtnText}>Return to map</Text>
+                </Pressable>
+              </>
+            ) : null}
           </View>
         </View>
       </Modal>
@@ -3629,7 +3927,11 @@ export default function App() {
                             trip.status === "in_progress" ||
                             trip.status === "awaiting_rider_checkout"
                           ? riderAcceptedInProgressBannerCopy(trip, driverCoord)
-                          : `Trip: ${trip.status}`}
+                          : trip.status === "completed"
+                            ? completedTripNeedsPaymentResolution(trip)
+                              ? "Ride complete — finish payment using the dialog on screen."
+                              : "Ride complete."
+                            : `Trip: ${trip.status}`}
                     </Text>
                     {(trip.status === "accepted" ||
                       trip.status === "in_progress" ||
@@ -4154,7 +4456,11 @@ export default function App() {
                         trip.status === "in_progress" ||
                         trip.status === "awaiting_rider_checkout"
                       ? riderAcceptedInProgressBannerCopy(trip, driverCoord)
-                      : `Trip: ${trip.status}`}
+                      : trip.status === "completed"
+                        ? completedTripNeedsPaymentResolution(trip)
+                          ? "Ride complete — finish payment using the dialog on screen."
+                          : "Ride complete."
+                        : `Trip: ${trip.status}`}
                 </Text>
                 {(trip.status === "accepted" ||
                   trip.status === "in_progress" ||
@@ -5153,6 +5459,14 @@ const styles = StyleSheet.create({
     marginTop: 10,
     lineHeight: 22,
   },
+  checkoutModalPaymentHint: {
+    fontSize: 13,
+    ...pj.r,
+    color: "#64748b",
+    textAlign: "center",
+    marginTop: 8,
+    lineHeight: 18,
+  },
   checkoutModalDeadline: {
     fontSize: 14,
     ...pj.m,
@@ -5168,6 +5482,22 @@ const styles = StyleSheet.create({
   },
   checkoutModalScrollContent: { flexGrow: 0, paddingBottom: 4 },
   checkoutModalClearRide: { alignSelf: "center", marginTop: 14 },
+  postCheckoutPaymentCard: { paddingBottom: 24 },
+  postCheckoutAmountLine: {
+    fontSize: 15,
+    ...pj.m,
+    color: "#0f172a",
+    textAlign: "center",
+    marginTop: 14,
+  },
+  postCheckoutSecondaryBtn: {
+    alignItems: "center",
+    justifyContent: "center",
+    paddingVertical: 12,
+    marginTop: 6,
+  },
+  postCheckoutSecondaryBtnText: { fontSize: 16, ...pj.m, color: "#64748b" },
+  postCheckoutSecondPrimary: { marginTop: 12 },
   checkoutTipTitle: { fontSize: 17, ...pj.sb, color: "#0f172a", marginTop: 18 },
   checkoutTipModeHint: {
     fontSize: 13,
