@@ -11,7 +11,7 @@ import { computeFareEstimate } from "../fareEstimate.js";
 import { fetchDrivingRouteSummary } from "../googleDirections.js";
 import { directionsApiKey } from "../lib/mapsKeys.js";
 import { recordTripStatusEvent } from "../lib/tripEvents.js";
-import { applyFareChargeToTrip } from "../lib/chargeTripFare.js";
+import { applyFareChargeToTrip, maxTipCentsAllowed, resolveTripFareUsd } from "../lib/chargeTripFare.js";
 import { getStripe, stripeEnabled } from "../lib/stripe.js";
 import { effectiveRequirePaymentMethodToBook } from "../lib/paymentPolicy.js";
 
@@ -376,6 +376,60 @@ export function createTripsRouter(deps) {
     const out = await loadTripSerialized(id);
     deps.onTripUpdated(out);
     res.json({ trip: out });
+  });
+
+  /** Rider: tip in cents (integer >= 0), bundled with fare in one PaymentIntent when the driver completes. */
+  r.post("/:id/rider-tip", authMiddleware, requireRole("rider"), async (req, res) => {
+    const id = req.params.id;
+    if (!mongoose.isValidObjectId(id)) {
+      res.status(400).json({ error: "Invalid id" });
+      return;
+    }
+    const raw = req.body?.tipAmountCents;
+    if (raw === undefined || raw === null || raw === "") {
+      res.status(400).json({ error: "tipAmountCents required (integer cents >= 0)" });
+      return;
+    }
+    const n = Number(raw);
+    if (!Number.isFinite(n) || n < 0) {
+      res.status(400).json({ error: "tipAmountCents must be a non-negative number" });
+      return;
+    }
+    const tipCents = Math.round(n);
+    if (tipCents !== n) {
+      res.status(400).json({ error: "tipAmountCents must be a whole number of cents" });
+      return;
+    }
+    try {
+      const trip = await Trip.findById(id).exec();
+      if (!trip || String(trip.rider) !== String(req.userId)) {
+        res.status(403).json({ error: "Forbidden" });
+        return;
+      }
+      if (!["accepted", "in_progress"].includes(trip.status)) {
+        res.status(400).json({ error: "Tip can only be set on an active trip" });
+        return;
+      }
+      const fare = await resolveTripFareUsd(trip);
+      if (!fare.ok) {
+        res.status(400).json({ error: "Fare estimate unavailable; try again in a moment." });
+        return;
+      }
+      const fareCents = fare.totalUsd > 0 ? Math.round(fare.totalUsd * 100) : 0;
+      const maxTip = maxTipCentsAllowed(fareCents);
+      if (tipCents > maxTip) {
+        res.status(400).json({ error: `tipAmountCents cannot exceed ${maxTip}` });
+        return;
+      }
+      trip.riderTipAmountCents = tipCents;
+      await trip.save();
+      const out = await loadTripSerialized(id);
+      deps.onTripUpdated(out);
+      res.json({ trip: out });
+    } catch (e) {
+      console.error("POST /trips/:id/rider-tip", e);
+      res.status(500).json({ error: e?.message || "Server error" });
+    }
   });
 
   r.post("/:id/complete", authMiddleware, requireRole("driver"), async (req, res) => {

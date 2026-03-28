@@ -84,6 +84,9 @@ const tripSchema = new mongoose.Schema(
     /** Routed driving path: pickup pin → dropoff pin (snapshot at in_progress). */
     rideRoute: { type: routedSegmentSchema, default: null },
 
+    /** Rider-set tip in cents (integer >= 0). Applied in one PaymentIntent with fare at driver complete. */
+    riderTipAmountCents: { type: Number, default: null },
+
     /** Set when the driver completes the trip (Stripe off-session charge when configured). */
     fareChargeStatus: {
       type: String,
@@ -101,6 +104,10 @@ const tripSchema = new mongoose.Schema(
       default: "none",
     },
     fareChargeAmountCents: { type: Number, default: null },
+    /** Fare portion of the charge (cents), before tip. */
+    fareChargeFareCents: { type: Number, default: null },
+    /** Tip portion included in fareChargeAmountCents. */
+    fareChargeTipCents: { type: Number, default: null },
     fareChargeCurrency: { type: String, default: "" },
     stripePaymentIntentId: { type: String, default: "" },
     fareChargeError: { type: String, default: "" },

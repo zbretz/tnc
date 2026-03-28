@@ -181,6 +181,9 @@ export function serializeTrip(t, options = {}) {
           },
         }
       : {}),
+    ...(t.riderTipAmountCents != null && Number.isFinite(Number(t.riderTipAmountCents))
+      ? { riderTipAmountCents: Math.round(Number(t.riderTipAmountCents)) }
+      : {}),
     ...(t.rideRoute?.computedAt
       ? {
           rideRoute: {
@@ -199,6 +202,8 @@ export function serializeTrip(t, options = {}) {
           fareCharge: {
             status: t.fareChargeStatus,
             ...(t.fareChargeAmountCents != null ? { amountCents: t.fareChargeAmountCents } : {}),
+            ...(t.fareChargeFareCents != null ? { farePortionCents: t.fareChargeFareCents } : {}),
+            ...(t.fareChargeTipCents != null ? { tipPortionCents: t.fareChargeTipCents } : {}),
             ...(t.fareChargeCurrency ? { currency: t.fareChargeCurrency } : {}),
             ...(t.fareChargeError ? { error: t.fareChargeError } : {}),
             ...(t.fareChargeStatus === "requires_action" ? { requiresAction: true } : {}),
