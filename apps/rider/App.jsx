@@ -63,8 +63,8 @@ const PLANNING_SNAP_HEIGHT_FRACTIONS = PLANNING_SNAP_POINTS.map((s) => {
 });
 /** Native trip sheet: pending request — shorter dock. */
 const TRIP_SHEET_SNAP_COMPACT_FRAC = 0.44;
-/** Native trip sheet: driver assigned / ride active / checkout — extra height so tip + summary fit without scrolling. */
-const TRIP_SHEET_SNAP_ROOMY_FRAC = 0.58;
+/** Native trip sheet: driver assigned / ride active / checkout — tip is a modal; keep sheet sized to summary + actions. */
+const TRIP_SHEET_SNAP_ROOMY_FRAC = 0.5;
 /** Legacy alias (compact); map FAB uses dynamic fraction when `trip` is set. */
 const TRIP_BOTTOM_DOCK_MAX_FRACTION = TRIP_SHEET_SNAP_COMPACT_FRAC;
 /** Default snap string when trip snap is computed per-status. */
@@ -795,10 +795,9 @@ export default function App() {
 
   /** Tip picker on active trip (accepted / in_progress) — saved via POST …/rider-tip. */
   const [inTripTipCustom, setInTripTipCustom] = useState(false);
-  const [inTripSuggestedExpanded, setInTripSuggestedExpanded] = useState(false);
   const [inTripCustomTipText, setInTripCustomTipText] = useState("");
   const [inTripTipBusy, setInTripTipBusy] = useState(false);
-  const [inTripTipOptionsOpen, setInTripTipOptionsOpen] = useState(false);
+  const [inTripTipModalOpen, setInTripTipModalOpen] = useState(false);
   const inTripTipSyncKeyRef = useRef("");
   const inTripTipDebounceRef = useRef(null);
 
@@ -1031,6 +1030,12 @@ export default function App() {
     return `Quoted fare $${RIDER_CHECKOUT_TIP_FARE_THRESHOLD_USD}+ — suggestions are 10%, 15%, and 20% of fare.`;
   }, [checkoutFareUsd]);
 
+  const inTripTipModalHint = useMemo(() => {
+    if (!Number.isFinite(checkoutFareUsd)) return "Fixed amounts.";
+    if (checkoutFareUsd < RIDER_CHECKOUT_TIP_FARE_THRESHOLD_USD) return "Fixed dollar amounts.";
+    return "10%, 15%, or 20% of quoted fare.";
+  }, [checkoutFareUsd]);
+
   const finalizeTripCheckout = useCallback(async () => {
     if (!token || !trip?._id || trip.status !== "awaiting_rider_checkout") return;
     const fareUsd = tripQuotedFareUsd(trip);
@@ -1118,6 +1123,38 @@ export default function App() {
     [checkoutMaxTipCents, submitInTripTip]
   );
 
+  const flushInTripTipDebounce = useCallback(() => {
+    if (inTripTipDebounceRef.current) {
+      clearTimeout(inTripTipDebounceRef.current);
+      inTripTipDebounceRef.current = null;
+    }
+  }, []);
+
+  const closeInTripTipModal = useCallback(() => {
+    Keyboard.dismiss();
+    flushInTripTipDebounce();
+    if (inTripTipCustom) {
+      const trimmed = String(inTripCustomTipText ?? "").trim();
+      if (trimmed === "") {
+        void submitInTripTip(0);
+      } else {
+        const p = parseTipDollarInputToCents(inTripCustomTipText, checkoutMaxTipCents);
+        if (p === null) {
+          Alert.alert("Tip", "Enter a valid dollar amount, or pick a suggestion.");
+          return;
+        }
+        void submitInTripTip(p);
+      }
+    }
+    setInTripTipModalOpen(false);
+  }, [
+    flushInTripTipDebounce,
+    inTripTipCustom,
+    inTripCustomTipText,
+    checkoutMaxTipCents,
+    submitInTripTip,
+  ]);
+
   useEffect(() => {
     return () => {
       if (inTripTipDebounceRef.current) clearTimeout(inTripTipDebounceRef.current);
@@ -1147,22 +1184,16 @@ export default function App() {
     const match = chips.find((c) => c.cents === clamped);
     if (match) {
       setInTripTipCustom(false);
-      setInTripSuggestedExpanded(false);
       setInTripCustomTipText("");
     } else {
       setInTripTipCustom(true);
-      setInTripSuggestedExpanded(false);
       setInTripCustomTipText(clamped > 0 ? (clamped / 100).toFixed(2) : "");
     }
   }, [trip?.status, trip?._id, trip?.riderTipAmountCents, trip?.fareEstimate?.total]);
 
   useEffect(() => {
-    if (!inTripTipCustom) setInTripSuggestedExpanded(false);
-  }, [inTripTipCustom]);
-
-  useEffect(() => {
     if (!trip || (trip.status !== "accepted" && trip.status !== "in_progress")) {
-      setInTripTipOptionsOpen(false);
+      setInTripTipModalOpen(false);
     }
   }, [trip?._id, trip?.status]);
 
@@ -2918,167 +2949,42 @@ export default function App() {
     );
   }
 
-  const renderInProgressTipBlock = () => {
+  const renderInTripTipRow = () => {
     if (!trip || (trip.status !== "accepted" && trip.status !== "in_progress")) return null;
     const committed =
       trip.riderTipAmountCents != null && Number.isFinite(Number(trip.riderTipAmountCents))
         ? Math.round(Number(trip.riderTipAmountCents))
         : 0;
     const tipDisabled = busy || checkoutFinalizing || inTripTipBusy;
-
-    const flushDebounce = () => {
-      if (inTripTipDebounceRef.current) {
-        clearTimeout(inTripTipDebounceRef.current);
-        inTripTipDebounceRef.current = null;
-      }
-    };
-
-    const collapsedSummary =
-      committed === 0
-        ? "None yet — tap to choose before the ride ends"
-        : `$${(committed / 100).toFixed(2)} selected · charged when ride ends`;
+    const valueLabel = committed === 0 ? "None" : `$${(committed / 100).toFixed(2)}`;
 
     return (
       <View style={styles.inTripTipSection}>
-        {!inTripTipOptionsOpen ? (
-          <Pressable
-            style={styles.inTripTipCollapsedBtn}
-            onPress={() => setInTripTipOptionsOpen(true)}
-            disabled={tipDisabled}
-            accessibilityRole="button"
-            accessibilityLabel="Tip options"
-            accessibilityHint="Opens tip amount choices for when the ride ends"
-          >
-            <View style={styles.inTripTipCollapsedTextCol}>
-              <Text style={styles.inTripTipCollapsedTitle}>Tip</Text>
-              <Text style={styles.inTripTipCollapsedSub} numberOfLines={2}>
-                {collapsedSummary}
-              </Text>
-            </View>
-            <Ionicons name="chevron-forward" size={20} color="#64748b" />
-          </Pressable>
-        ) : (
-          <>
-            <Pressable
-              style={styles.inTripTipDoneRow}
-              onPress={() => {
-                Keyboard.dismiss();
-                setInTripTipOptionsOpen(false);
-              }}
-              accessibilityRole="button"
-              accessibilityLabel="Close tip options"
-            >
-              <Text style={styles.inTripTipDoneText}>Done</Text>
-              <Ionicons name="chevron-up" size={20} color="#64748b" />
-            </Pressable>
-            <Text style={styles.inTripTipTitle}>Choose tip</Text>
-            <Text style={styles.checkoutTipModeHint}>{checkoutTipModeHint}</Text>
-            {inTripTipCustom ? (
-              <>
-                <View style={[styles.checkoutCustomTipBlock, styles.inTripTipCustomTop]}>
-                  <Text style={styles.checkoutCustomTipLabel}>Custom amount (USD)</Text>
-                  <TextInput
-                    style={styles.checkoutCustomTipInput}
-                    value={inTripCustomTipText}
-                    onChangeText={(text) => {
-                      setInTripCustomTipText(text);
-                      scheduleInTripCustomTipSave(text);
-                    }}
-                    keyboardType="decimal-pad"
-                    placeholder="0.00"
-                    editable={!tipDisabled}
-                  />
-                </View>
-                {!inTripSuggestedExpanded ? (
-                  <Pressable
-                    style={styles.checkoutSuggestedCollapsed}
-                    onPress={() => setInTripSuggestedExpanded(true)}
-                    disabled={tipDisabled}
-                  >
-                    <Text style={styles.checkoutSuggestedCollapsedText}>Suggested tips</Text>
-                    <Ionicons name="chevron-down" size={18} color="#64748b" />
-                  </Pressable>
-                ) : (
-                  <>
-                    <Pressable
-                      style={styles.checkoutSuggestedHideRow}
-                      onPress={() => setInTripSuggestedExpanded(false)}
-                      disabled={tipDisabled}
-                    >
-                      <Text style={styles.checkoutSuggestedHideText}>Hide suggested tips</Text>
-                      <Ionicons name="chevron-up" size={18} color="#64748b" />
-                    </Pressable>
-                    <View style={styles.checkoutTipChips}>
-                      {checkoutTipPresetChips.map((opt) => (
-                        <Pressable
-                          key={opt.key}
-                          style={[styles.checkoutTipChip, styles.checkoutTipChipCompact]}
-                          onPress={() => {
-                            flushDebounce();
-                            setInTripTipCustom(false);
-                            setInTripSuggestedExpanded(false);
-                            setInTripCustomTipText("");
-                            void submitInTripTip(opt.cents);
-                          }}
-                          disabled={tipDisabled}
-                        >
-                          <Text style={styles.checkoutTipChipText}>{opt.label}</Text>
-                        </Pressable>
-                      ))}
-                    </View>
-                  </>
-                )}
-              </>
-            ) : (
-              <View style={styles.checkoutTipChips}>
-                {checkoutTipPresetChips.map((opt) => (
-                  <Pressable
-                    key={opt.key}
-                    style={[
-                      styles.checkoutTipChip,
-                      committed === opt.cents && styles.checkoutTipChipSelected,
-                    ]}
-                    onPress={() => {
-                      flushDebounce();
-                      setInTripTipCustom(false);
-                      setInTripCustomTipText("");
-                      void submitInTripTip(opt.cents);
-                    }}
-                    disabled={tipDisabled}
-                  >
-                    <Text
-                      style={[
-                        styles.checkoutTipChipText,
-                        committed === opt.cents && styles.checkoutTipChipTextSelected,
-                      ]}
-                    >
-                      {opt.label}
-                    </Text>
-                  </Pressable>
-                ))}
-                <Pressable
-                  style={styles.checkoutTipChip}
-                  onPress={() => {
-                    flushDebounce();
-                    setInTripTipCustom(true);
-                    setInTripSuggestedExpanded(false);
-                    setInTripCustomTipText(committed > 0 ? (committed / 100).toFixed(2) : "");
-                  }}
-                  disabled={tipDisabled}
-                >
-                  <Text style={styles.checkoutTipChipText}>Custom</Text>
-                </Pressable>
-              </View>
-            )}
-            <Text style={styles.checkoutMaxTipNote}>
-              Max tip for this ride: ${(checkoutMaxTipCents / 100).toFixed(2)}
-              {inTripTipBusy ? " · Saving…" : ""}
-            </Text>
-          </>
-        )}
+        <Pressable
+          style={styles.inTripTipRowBtn}
+          onPress={() => setInTripTipModalOpen(true)}
+          disabled={tipDisabled}
+          accessibilityRole="button"
+          accessibilityLabel={`Tip, ${valueLabel}`}
+        >
+          <Text style={styles.inTripTipRowLabel}>Tip</Text>
+          <Text style={styles.inTripTipRowValue} numberOfLines={1}>
+            {valueLabel}
+          </Text>
+          <Ionicons name="chevron-forward" size={18} color="#94a3b8" />
+        </Pressable>
       </View>
     );
   };
+
+  const inTripTipModalVisible =
+    inTripTipModalOpen &&
+    trip &&
+    (trip.status === "accepted" || trip.status === "in_progress");
+  const inTripModalCommittedCents =
+    trip?.riderTipAmountCents != null && Number.isFinite(Number(trip?.riderTipAmountCents))
+      ? Math.round(Number(trip.riderTipAmountCents))
+      : 0;
 
   return (
     <View style={styles.container}>
@@ -3375,6 +3281,115 @@ export default function App() {
           </View>
         </View>
       </Modal>
+      <Modal
+        visible={inTripTipModalVisible}
+        animationType="fade"
+        transparent
+        statusBarTranslucent
+        presentationStyle={Platform.OS === "ios" ? "overFullScreen" : undefined}
+        onRequestClose={closeInTripTipModal}
+      >
+        <View style={styles.checkoutModalRoot}>
+          <Pressable
+            style={styles.inTripTipModalBackdrop}
+            onPress={closeInTripTipModal}
+            accessibilityRole="button"
+            accessibilityLabel="Dismiss"
+          />
+          <View style={[styles.checkoutModalCard, styles.inTripTipModalCard]}>
+            <ScrollView
+              keyboardShouldPersistTaps="handled"
+              showsVerticalScrollIndicator={false}
+              bounces={false}
+              contentContainerStyle={styles.checkoutModalScrollContent}
+            >
+              <Text style={[styles.checkoutModalTitle, styles.inTripTipModalTitle]}>Tip</Text>
+              <Text style={styles.inTripTipModalSubtitle}>With fare when the trip ends.</Text>
+              <Text style={[styles.checkoutTipModeHint, styles.inTripTipModalHint]}>{inTripTipModalHint}</Text>
+              {inTripTipCustom ? (
+                <View style={styles.checkoutCustomTipBlock}>
+                  <Text style={styles.checkoutCustomTipLabel}>Custom (USD)</Text>
+                  <TextInput
+                    style={styles.checkoutCustomTipInput}
+                    value={inTripCustomTipText}
+                    onChangeText={(text) => {
+                      setInTripCustomTipText(text);
+                      scheduleInTripCustomTipSave(text);
+                    }}
+                    keyboardType="decimal-pad"
+                    placeholder="0.00"
+                    editable={!busy && !checkoutFinalizing && !inTripTipBusy}
+                  />
+                </View>
+              ) : null}
+              <View style={styles.checkoutTipChips}>
+                {checkoutTipPresetChips.map((opt) => (
+                  <Pressable
+                    key={opt.key}
+                    style={[
+                      styles.checkoutTipChip,
+                      inTripModalCommittedCents === opt.cents &&
+                        !inTripTipCustom &&
+                        styles.checkoutTipChipSelected,
+                    ]}
+                    onPress={() => {
+                      flushInTripTipDebounce();
+                      setInTripTipCustom(false);
+                      setInTripCustomTipText("");
+                      void submitInTripTip(opt.cents);
+                    }}
+                    disabled={busy || checkoutFinalizing || inTripTipBusy}
+                  >
+                    <Text
+                      style={[
+                        styles.checkoutTipChipText,
+                        inTripModalCommittedCents === opt.cents &&
+                          !inTripTipCustom &&
+                          styles.checkoutTipChipTextSelected,
+                      ]}
+                    >
+                      {opt.label}
+                    </Text>
+                  </Pressable>
+                ))}
+                <Pressable
+                  style={[styles.checkoutTipChip, inTripTipCustom && styles.checkoutTipChipSelected]}
+                  onPress={() => {
+                    flushInTripTipDebounce();
+                    setInTripTipCustom(true);
+                    setInTripCustomTipText(
+                      inTripModalCommittedCents > 0
+                        ? (inTripModalCommittedCents / 100).toFixed(2)
+                        : ""
+                    );
+                  }}
+                  disabled={busy || checkoutFinalizing || inTripTipBusy}
+                >
+                  <Text
+                    style={[
+                      styles.checkoutTipChipText,
+                      inTripTipCustom && styles.checkoutTipChipTextSelected,
+                    ]}
+                  >
+                    Custom
+                  </Text>
+                </Pressable>
+              </View>
+              <Text style={styles.checkoutMaxTipNote}>
+                Max ${(checkoutMaxTipCents / 100).toFixed(2)}
+                {inTripTipBusy ? " · Saving…" : ""}
+              </Text>
+            </ScrollView>
+            <Pressable
+              style={styles.inTripTipModalDoneBtn}
+              onPress={closeInTripTipModal}
+              disabled={busy || checkoutFinalizing || inTripTipBusy}
+            >
+              <Text style={styles.inTripTipModalDoneText}>Done</Text>
+            </Pressable>
+          </View>
+        </View>
+      </Modal>
       {showRidersClosedGate ? (
         <View style={styles.ridersClosedLayer} pointerEvents="box-none">
           <View style={styles.ridersClosedCard} pointerEvents="auto">
@@ -3654,8 +3669,6 @@ export default function App() {
                         ) : null}
                       </View>
                     ) : null}
-                    {(trip.status === "accepted" || trip.status === "in_progress") &&
-                      renderInProgressTipBlock()}
                     <View style={styles.addrSection}>
                       <Text style={styles.addrText}>Pickup: {trip?.pickupAddress || "Not available"}</Text>
                       <Text style={styles.addrText}>Dropoff: {trip?.dropoffAddress || "Not set"}</Text>
@@ -3683,6 +3696,7 @@ export default function App() {
                         )
                       ) : null}
                     </View>
+                    {(trip.status === "accepted" || trip.status === "in_progress") && renderInTripTipRow()}
                   </>
                   <View style={styles.row}>
                     {trip && trip.status !== "completed" && trip.status !== "cancelled" ? (
@@ -4180,7 +4194,6 @@ export default function App() {
                     ) : null}
                   </View>
                 ) : null}
-                {(trip.status === "accepted" || trip.status === "in_progress") && renderInProgressTipBlock()}
                 <View style={styles.addrSection}>
                   <Text style={styles.addrText}>Pickup: {trip?.pickupAddress || "Not available"}</Text>
                   <Text style={styles.addrText}>Dropoff: {trip?.dropoffAddress || "Not set"}</Text>
@@ -4208,6 +4221,7 @@ export default function App() {
                     )
                   ) : null}
                 </View>
+                {(trip.status === "accepted" || trip.status === "in_progress") && renderInTripTipRow()}
               </>
               <View style={styles.row}>
                 {trip && trip.status !== "completed" && trip.status !== "cancelled" ? (
@@ -4325,11 +4339,11 @@ const styles = StyleSheet.create({
     borderTopWidth: StyleSheet.hairlineWidth,
     borderTopColor: "#cbd5e1",
   },
-  /** Web: taller panel when driver is assigned / ride active / checkout (matches native ~58% sheet). */
+  /** Web: taller panel when driver is assigned / ride active / checkout (aligned with native trip snap). */
   bottomPanelWebTripRoomy: {
-    flex: 1.4,
-    minHeight: Math.round(SCREEN_HEIGHT * 0.5),
-    maxHeight: Math.round(SCREEN_HEIGHT * 0.62),
+    flex: 1.12,
+    minHeight: Math.round(SCREEN_HEIGHT * 0.4),
+    maxHeight: Math.round(SCREEN_HEIGHT * TRIP_SHEET_SNAP_ROOMY_FRAC),
   },
   /** Web: book ride step matches native sheet height so footer stays on-screen. */
   bottomPanelBookRideWeb: {
@@ -5182,36 +5196,50 @@ const styles = StyleSheet.create({
     marginTop: 10,
   },
   inTripTipSection: {
-    marginTop: 14,
-    paddingTop: 14,
+    marginTop: 8,
+    paddingTop: 8,
     borderTopWidth: 1,
     borderTopColor: "#e2e8f0",
   },
-  inTripTipCollapsedBtn: {
+  inTripTipRowBtn: {
     flexDirection: "row",
     alignItems: "center",
-    justifyContent: "space-between",
-    paddingVertical: 12,
-    paddingHorizontal: 14,
+    paddingVertical: 8,
+    paddingHorizontal: 10,
     backgroundColor: "#f8fafc",
-    borderRadius: 12,
+    borderRadius: 10,
     borderWidth: 1,
     borderColor: "#e2e8f0",
   },
-  inTripTipCollapsedTextCol: { flex: 1, paddingRight: 12 },
-  inTripTipCollapsedTitle: { fontSize: 16, ...pj.sb, color: "#0f172a" },
-  inTripTipCollapsedSub: { fontSize: 13, ...pj.r, color: "#64748b", marginTop: 4, lineHeight: 18 },
-  inTripTipDoneRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "flex-end",
-    gap: 6,
-    marginBottom: 10,
-    paddingVertical: 4,
+  inTripTipRowLabel: { fontSize: 13, ...pj.m, color: "#64748b", marginRight: 8 },
+  inTripTipRowValue: { flex: 1, textAlign: "right", marginRight: 4, fontSize: 14, ...pj.sb, color: "#0f172a" },
+  inTripTipModalBackdrop: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: "rgba(15, 23, 42, 0.58)",
   },
-  inTripTipDoneText: { fontSize: 15, ...pj.m, color: "#2563eb" },
-  inTripTipTitle: { fontSize: 16, ...pj.sb, color: "#0f172a" },
-  inTripTipCustomTop: { marginTop: 8 },
+  inTripTipModalCard: {
+    maxHeight: "82%",
+    paddingHorizontal: 20,
+    paddingTop: 18,
+    paddingBottom: 14,
+  },
+  inTripTipModalTitle: { fontSize: 20 },
+  inTripTipModalSubtitle: {
+    fontSize: 13,
+    ...pj.r,
+    color: "#64748b",
+    textAlign: "center",
+    marginTop: 6,
+    lineHeight: 18,
+  },
+  inTripTipModalHint: { marginTop: 8 },
+  inTripTipModalDoneBtn: {
+    alignItems: "center",
+    justifyContent: "center",
+    paddingVertical: 12,
+    marginTop: 4,
+  },
+  inTripTipModalDoneText: { fontSize: 16, ...pj.m, color: "#2563eb" },
   checkoutSuggestedCollapsed: {
     flexDirection: "row",
     alignItems: "center",
