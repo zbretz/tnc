@@ -41,6 +41,8 @@ import BottomSheet, { BottomSheetScrollView, BottomSheetTextInput } from "@gorho
 SplashScreen.preventAutoHideAsync().catch(() => {});
 
 const TOKEN_KEY = "tnc_token";
+/** Persisted Mongo id string; re-fetch on cold start so reload does not drop the active trip. */
+const RIDER_ACTIVE_TRIP_ID_KEY = "tnc_rider_active_trip_id";
 
 /**
  * Map center when pickup is not set yet. Not a real user location — only fills `initialRegion` until
@@ -778,6 +780,11 @@ export default function App() {
   }, [pickupTimeOptions, pickupOffsetMinutes]);
 
   const [trip, setTrip] = useState(null);
+  /** Latest trip for restore race (avoid overwriting if user books before GET /trips/:id returns). */
+  const tripRefForRestore = useRef(null);
+  tripRefForRestore.current = trip;
+  /** Previous trip id — only clear AsyncStorage on transition to null, not on first mount. */
+  const persistedTripIdPrevRef = useRef(null);
   /** True while we are tearing down the trip dock (ignore stray driver:location / refits). */
   const tripDockClosingRef = useRef(false);
   const [driverLive, setDriverLive] = useState(null);
@@ -1038,6 +1045,68 @@ export default function App() {
       });
     }
   }, [returnToPlanningAfterTripEnds]);
+
+  useEffect(() => {
+    if (!token) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const id = await AsyncStorage.getItem(RIDER_ACTIVE_TRIP_ID_KEY);
+        if (!id || cancelled) return;
+        const out = await api(`/trips/${id}`, { token });
+        if (cancelled) return;
+        const t = out?.trip;
+        if (!t || typeof t !== "object") {
+          await AsyncStorage.removeItem(RIDER_ACTIVE_TRIP_ID_KEY);
+          return;
+        }
+        const cur = tripRefForRestore.current;
+        if (cur != null && String(cur._id) !== String(t._id)) {
+          return;
+        }
+        const pu = finiteLatLngObject(t.pickup) ?? t.pickup;
+        const du = finiteLatLngObject(t.dropoff) ?? t.dropoff;
+        applyIncomingTrip(normalizeTripForClient(t, pu, du));
+      } catch {
+        try {
+          await AsyncStorage.removeItem(RIDER_ACTIVE_TRIP_ID_KEY);
+        } catch {
+          /* ignore */
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [token, applyIncomingTrip]);
+
+  useEffect(() => {
+    (async () => {
+      const curId = trip?._id != null ? String(trip._id) : null;
+      const prevId = persistedTripIdPrevRef.current;
+      try {
+        if (curId) {
+          const st = trip.status;
+          const persistActiveLeg =
+            RIDER_TRIP_MAP_STATUSES.includes(st) ||
+            (st === "completed" && completedTripNeedsPaymentResolution(trip));
+          if (persistActiveLeg) {
+            await AsyncStorage.setItem(RIDER_ACTIVE_TRIP_ID_KEY, curId);
+          } else {
+            await AsyncStorage.removeItem(RIDER_ACTIVE_TRIP_ID_KEY);
+          }
+          persistedTripIdPrevRef.current = curId;
+          return;
+        }
+        if (prevId != null) {
+          await AsyncStorage.removeItem(RIDER_ACTIVE_TRIP_ID_KEY);
+        }
+        persistedTripIdPrevRef.current = null;
+      } catch {
+        /* ignore */
+      }
+    })();
+  }, [trip]);
 
   const exitPostCheckoutPaymentToPlanning = useCallback(
     (tripId) => {
@@ -1957,6 +2026,8 @@ export default function App() {
       }
     }
     await AsyncStorage.removeItem(TOKEN_KEY);
+    await AsyncStorage.removeItem(RIDER_ACTIVE_TRIP_ID_KEY);
+    persistedTripIdPrevRef.current = null;
     setRideInterstitialReset(false);
     setShowLocalStatusPreview(false);
     setToken(null);
