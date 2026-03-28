@@ -2,6 +2,7 @@ import { Router } from "express";
 import { authMiddleware, requireRole } from "../middleware/auth.js";
 import { User } from "../models/User.js";
 import { getStripe, stripeEnabled } from "../lib/stripe.js";
+import { effectiveRequirePaymentMethodToBook } from "../lib/paymentPolicy.js";
 
 export const paymentsRouter = Router();
 
@@ -15,14 +16,24 @@ paymentsRouter.get("/public-config", (_req, res) => {
   res.json({
     stripePublishableKey: publishableKeyFromEnv(),
     paymentsEnabled: stripeEnabled(),
+    requirePaymentMethodToBook: effectiveRequirePaymentMethodToBook(),
   });
 });
 
-paymentsRouter.get("/config", authMiddleware, requireRole("rider"), (_req, res) => {
-  res.json({
-    stripePublishableKey: publishableKeyFromEnv(),
-    paymentsEnabled: stripeEnabled(),
-  });
+paymentsRouter.get("/config", authMiddleware, requireRole("rider"), async (req, res) => {
+  try {
+    const user = await User.findById(req.userId).select("stripeDefaultPaymentMethodId").lean().exec();
+    const hasDefaultPaymentMethod = Boolean(user?.stripeDefaultPaymentMethodId?.trim());
+    res.json({
+      stripePublishableKey: publishableKeyFromEnv(),
+      paymentsEnabled: stripeEnabled(),
+      requirePaymentMethodToBook: effectiveRequirePaymentMethodToBook(),
+      hasDefaultPaymentMethod,
+    });
+  } catch (e) {
+    console.error("GET /payments/config", e);
+    res.status(500).json({ error: e?.message || "Server error" });
+  }
 });
 
 async function ensureStripeCustomer(user) {

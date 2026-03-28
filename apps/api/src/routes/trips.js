@@ -13,6 +13,7 @@ import { directionsApiKey } from "../lib/mapsKeys.js";
 import { recordTripStatusEvent } from "../lib/tripEvents.js";
 import { applyFareChargeToTrip } from "../lib/chargeTripFare.js";
 import { getStripe, stripeEnabled } from "../lib/stripe.js";
+import { effectiveRequirePaymentMethodToBook } from "../lib/paymentPolicy.js";
 
 const POPULATE_DRIVER = { path: "driver", select: "-passwordHash" };
 
@@ -125,6 +126,16 @@ export function createTripsRouter(deps) {
         code: "riders_closed",
       });
       return;
+    }
+    if (effectiveRequirePaymentMethodToBook()) {
+      const riderPay = await User.findById(req.userId).select("stripeDefaultPaymentMethodId").lean().exec();
+      if (!riderPay?.stripeDefaultPaymentMethodId?.trim()) {
+        res.status(400).json({
+          error: "Add a payment method before booking.",
+          code: "payment_method_required",
+        });
+        return;
+      }
     }
     const { pickup, dropoff, pickupAddress, dropoffAddress, pickupOffsetMinutes, preferredPickupAt } = req.body || {};
     const pickupLL = parseLatLng(pickup);
