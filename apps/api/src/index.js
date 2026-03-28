@@ -20,6 +20,7 @@ import {
 import { createAdminRouter } from "./routes/admin.js";
 import { routesRouter } from "./routes/routes.js";
 import { pricingRouter } from "./routes/pricing.js";
+import { paymentsRouter } from "./routes/payments.js";
 
 const PORT = Number(process.env.PORT) || 3000;
 
@@ -71,6 +72,7 @@ app.use("/trips", tripsRouter);
 app.use("/admin", adminRouter);
 app.use("/routes", routesRouter);
 app.use("/pricing", pricingRouter);
+app.use("/payments", paymentsRouter);
 
 app.get("/config/rider", async (_req, res) => {
   try {

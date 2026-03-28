@@ -34,6 +34,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import { io } from "socket.io-client";
 import { StatusBar } from "expo-status-bar";
 import { Ionicons } from "@expo/vector-icons";
+import { useStripe } from "@stripe/stripe-react-native";
 import { getApiUrl, getGoogleGeocodingApiKey, getGooglePlacesApiKey, getStripePublishableKey } from "./lib/config";
 import BottomSheet, { BottomSheetScrollView, BottomSheetTextInput } from "@gorhom/bottom-sheet";
 
@@ -289,6 +290,8 @@ function maskPhoneForDisplay(raw) {
   if (d.length <= 4) return d || "your number";
   return `••••${d.slice(-4)}`;
 }
+
+const STRIPE_RETURN_URL = "tnc-rider://stripe-redirect";
 
 async function api(path, opts = {}) {
   const { method = "GET", body, token } = opts;
@@ -673,6 +676,8 @@ export default function App() {
   const [addressPredictions, setAddressPredictions] = useState([]);
   const [addressPredictionsLoading, setAddressPredictionsLoading] = useState(false);
   const [keyboardInset, setKeyboardInset] = useState(0);
+
+  const { initPaymentSheet, presentPaymentSheet, retrieveSetupIntent, resetPaymentSheetCustomer } = useStripe();
 
   /** Full planning reset — same baseline as a fresh “Select pickup” session (used after ride ends + on logout). */
   const resetPlanningToInitialPickup = useCallback(() => {
@@ -1387,6 +1392,13 @@ export default function App() {
   }, [token, trip?._id]);
 
   const logout = async () => {
+    if (Platform.OS !== "web") {
+      try {
+        await resetPaymentSheetCustomer();
+      } catch {
+        /* ignore */
+      }
+    }
     await AsyncStorage.removeItem(TOKEN_KEY);
     setRideInterstitialReset(false);
     setShowLocalStatusPreview(false);
@@ -1397,24 +1409,70 @@ export default function App() {
     socketRef.current?.disconnect();
   };
 
-  /** Placeholder until API SetupIntent + Payment Sheet are wired (incremental payments work). */
-  const onPaymentMethodsInfo = useCallback(() => {
+  const openPaymentMethodSheet = useCallback(async () => {
     if (Platform.OS === "web") {
       Alert.alert("Payment methods", "Add a card in the iOS or Android app.");
       return;
     }
-    if (!getStripePublishableKey().trim()) {
+    if (!token) {
+      Alert.alert("Sign in required", "Log in to save a payment method.");
+      return;
+    }
+    const pk = getStripePublishableKey().trim();
+    if (!pk) {
       Alert.alert(
         "Stripe",
-        "Set EXPO_PUBLIC_STRIPE_PUBLISHABLE_KEY in the project .env (test or live publishable key), then restart Expo and rebuild the native app (expo run:ios / prebuild)."
+        "Set EXPO_PUBLIC_STRIPE_PUBLISHABLE_KEY in the project .env, restart Expo, and rebuild the native app."
       );
       return;
     }
-    Alert.alert(
-      "Payment methods",
-      "Stripe native SDK is enabled. Next: add an API route that returns a SetupIntent client secret, then open Payment Sheet from here."
-    );
-  }, []);
+    setBusy(true);
+    try {
+      const cfg = await api("/payments/config", { token });
+      if (!cfg.paymentsEnabled) {
+        Alert.alert("Payments", "The server does not have Stripe enabled (set STRIPE_SECRET_KEY in apps/api/.env).");
+        return;
+      }
+      const { clientSecret } = await api("/payments/setup-intent", { method: "POST", token });
+      if (typeof clientSecret !== "string" || !clientSecret.length) {
+        throw new Error("No setup intent from server.");
+      }
+      const init = await initPaymentSheet({
+        merchantDisplayName: "TNC Rider",
+        setupIntentClientSecret: clientSecret,
+        returnURL: STRIPE_RETURN_URL,
+        allowsDelayedPaymentMethods: false,
+      });
+      if (init.error) {
+        throw new Error(init.error.message || "Could not open payment sheet.");
+      }
+      const pres = await presentPaymentSheet();
+      if (pres.error) {
+        const code = pres.error.code;
+        if (code === "Canceled" || code === "Cancelled") return;
+        throw new Error(pres.error.message || "Payment sheet closed with an error.");
+      }
+      const retrieved = await retrieveSetupIntent(clientSecret);
+      if (retrieved.error) {
+        throw new Error(retrieved.error.message || "Could not confirm card setup.");
+      }
+      const pmId =
+        retrieved.setupIntent?.paymentMethod?.id || retrieved.setupIntent?.paymentMethodId || "";
+      if (typeof pmId !== "string" || !pmId.startsWith("pm_")) {
+        throw new Error("Card was saved but no payment method id was returned.");
+      }
+      await api("/payments/default-payment-method", {
+        method: "POST",
+        token,
+        body: { paymentMethodId: pmId },
+      });
+      Alert.alert("Card saved", "We will use this card for ride charges when billing is enabled.");
+    } catch (e) {
+      Alert.alert("Could not save card", e?.message ? String(e.message) : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }, [token, initPaymentSheet, presentPaymentSheet, retrieveSetupIntent]);
 
   const centerOnMe = async () => {
     const { status } = await Location.requestForegroundPermissionsAsync();
@@ -2427,7 +2485,7 @@ export default function App() {
         onPress={() =>
           Alert.alert("Account", undefined, [
             { text: "Cancel", style: "cancel" },
-            { text: "Payment methods", onPress: () => void onPaymentMethodsInfo() },
+            { text: "Payment methods", onPress: () => void openPaymentMethodSheet() },
             { text: "Log out", style: "destructive", onPress: () => void logout() },
           ])
         }

@@ -42,6 +42,11 @@ const userSchema = new mongoose.Schema(
     vehicle: { type: vehicleSchema, default: () => ({}) },
     /** Primary ops driver (seed: driver1@tnc.local). Can toggle rider availability and see rider phones on requests. */
     isAdmin: { type: Boolean, default: false },
+
+    /** Stripe Customer for riders (saved cards). */
+    stripeCustomerId: { type: String, trim: true, default: "", sparse: true },
+    /** Default PaymentMethod id (pm_...) for charges. */
+    stripeDefaultPaymentMethodId: { type: String, trim: true, default: "" },
   },
   { timestamps: true }
 );
