@@ -785,6 +785,7 @@ export default function App() {
   const [inTripSuggestedExpanded, setInTripSuggestedExpanded] = useState(false);
   const [inTripCustomTipText, setInTripCustomTipText] = useState("");
   const [inTripTipBusy, setInTripTipBusy] = useState(false);
+  const [inTripTipOptionsOpen, setInTripTipOptionsOpen] = useState(false);
   const inTripTipSyncKeyRef = useRef("");
   const inTripTipDebounceRef = useRef(null);
 
@@ -1145,6 +1146,12 @@ export default function App() {
   useEffect(() => {
     if (!inTripTipCustom) setInTripSuggestedExpanded(false);
   }, [inTripTipCustom]);
+
+  useEffect(() => {
+    if (!trip || (trip.status !== "accepted" && trip.status !== "in_progress")) {
+      setInTripTipOptionsOpen(false);
+    }
+  }, [trip?._id, trip?.status]);
 
   const checkoutModalVisible = trip?.status === "awaiting_rider_checkout";
 
@@ -2901,111 +2908,149 @@ export default function App() {
       }
     };
 
+    const collapsedSummary =
+      committed === 0
+        ? "None yet — tap to choose before the ride ends"
+        : `$${(committed / 100).toFixed(2)} selected · charged when ride ends`;
+
     return (
       <View style={styles.inTripTipSection}>
-        <Text style={styles.inTripTipTitle}>Tip (charged when ride ends)</Text>
-        <Text style={styles.checkoutTipModeHint}>{checkoutTipModeHint}</Text>
-        {inTripTipCustom ? (
-          <>
-            <View style={[styles.checkoutCustomTipBlock, styles.inTripTipCustomTop]}>
-              <Text style={styles.checkoutCustomTipLabel}>Custom amount (USD)</Text>
-              <TextInput
-                style={styles.checkoutCustomTipInput}
-                value={inTripCustomTipText}
-                onChangeText={(text) => {
-                  setInTripCustomTipText(text);
-                  scheduleInTripCustomTipSave(text);
-                }}
-                keyboardType="decimal-pad"
-                placeholder="0.00"
-                editable={!tipDisabled}
-              />
+        {!inTripTipOptionsOpen ? (
+          <Pressable
+            style={styles.inTripTipCollapsedBtn}
+            onPress={() => setInTripTipOptionsOpen(true)}
+            disabled={tipDisabled}
+            accessibilityRole="button"
+            accessibilityLabel="Tip options"
+            accessibilityHint="Opens tip amount choices for when the ride ends"
+          >
+            <View style={styles.inTripTipCollapsedTextCol}>
+              <Text style={styles.inTripTipCollapsedTitle}>Tip</Text>
+              <Text style={styles.inTripTipCollapsedSub} numberOfLines={2}>
+                {collapsedSummary}
+              </Text>
             </View>
-            {!inTripSuggestedExpanded ? (
-              <Pressable
-                style={styles.checkoutSuggestedCollapsed}
-                onPress={() => setInTripSuggestedExpanded(true)}
-                disabled={tipDisabled}
-              >
-                <Text style={styles.checkoutSuggestedCollapsedText}>Suggested tips</Text>
-                <Ionicons name="chevron-down" size={18} color="#64748b" />
-              </Pressable>
-            ) : (
+            <Ionicons name="chevron-forward" size={20} color="#64748b" />
+          </Pressable>
+        ) : (
+          <>
+            <Pressable
+              style={styles.inTripTipDoneRow}
+              onPress={() => {
+                Keyboard.dismiss();
+                setInTripTipOptionsOpen(false);
+              }}
+              accessibilityRole="button"
+              accessibilityLabel="Close tip options"
+            >
+              <Text style={styles.inTripTipDoneText}>Done</Text>
+              <Ionicons name="chevron-up" size={20} color="#64748b" />
+            </Pressable>
+            <Text style={styles.inTripTipTitle}>Choose tip</Text>
+            <Text style={styles.checkoutTipModeHint}>{checkoutTipModeHint}</Text>
+            {inTripTipCustom ? (
               <>
-                <Pressable
-                  style={styles.checkoutSuggestedHideRow}
-                  onPress={() => setInTripSuggestedExpanded(false)}
-                  disabled={tipDisabled}
-                >
-                  <Text style={styles.checkoutSuggestedHideText}>Hide suggested tips</Text>
-                  <Ionicons name="chevron-up" size={18} color="#64748b" />
-                </Pressable>
-                <View style={styles.checkoutTipChips}>
-                  {checkoutTipPresetChips.map((opt) => (
+                <View style={[styles.checkoutCustomTipBlock, styles.inTripTipCustomTop]}>
+                  <Text style={styles.checkoutCustomTipLabel}>Custom amount (USD)</Text>
+                  <TextInput
+                    style={styles.checkoutCustomTipInput}
+                    value={inTripCustomTipText}
+                    onChangeText={(text) => {
+                      setInTripCustomTipText(text);
+                      scheduleInTripCustomTipSave(text);
+                    }}
+                    keyboardType="decimal-pad"
+                    placeholder="0.00"
+                    editable={!tipDisabled}
+                  />
+                </View>
+                {!inTripSuggestedExpanded ? (
+                  <Pressable
+                    style={styles.checkoutSuggestedCollapsed}
+                    onPress={() => setInTripSuggestedExpanded(true)}
+                    disabled={tipDisabled}
+                  >
+                    <Text style={styles.checkoutSuggestedCollapsedText}>Suggested tips</Text>
+                    <Ionicons name="chevron-down" size={18} color="#64748b" />
+                  </Pressable>
+                ) : (
+                  <>
                     <Pressable
-                      key={opt.key}
-                      style={[styles.checkoutTipChip, styles.checkoutTipChipCompact]}
-                      onPress={() => {
-                        flushDebounce();
-                        setInTripTipCustom(false);
-                        setInTripSuggestedExpanded(false);
-                        setInTripCustomTipText("");
-                        void submitInTripTip(opt.cents);
-                      }}
+                      style={styles.checkoutSuggestedHideRow}
+                      onPress={() => setInTripSuggestedExpanded(false)}
                       disabled={tipDisabled}
                     >
-                      <Text style={styles.checkoutTipChipText}>{opt.label}</Text>
+                      <Text style={styles.checkoutSuggestedHideText}>Hide suggested tips</Text>
+                      <Ionicons name="chevron-up" size={18} color="#64748b" />
                     </Pressable>
-                  ))}
-                </View>
+                    <View style={styles.checkoutTipChips}>
+                      {checkoutTipPresetChips.map((opt) => (
+                        <Pressable
+                          key={opt.key}
+                          style={[styles.checkoutTipChip, styles.checkoutTipChipCompact]}
+                          onPress={() => {
+                            flushDebounce();
+                            setInTripTipCustom(false);
+                            setInTripSuggestedExpanded(false);
+                            setInTripCustomTipText("");
+                            void submitInTripTip(opt.cents);
+                          }}
+                          disabled={tipDisabled}
+                        >
+                          <Text style={styles.checkoutTipChipText}>{opt.label}</Text>
+                        </Pressable>
+                      ))}
+                    </View>
+                  </>
+                )}
               </>
-            )}
-          </>
-        ) : (
-          <View style={styles.checkoutTipChips}>
-            {checkoutTipPresetChips.map((opt) => (
-              <Pressable
-                key={opt.key}
-                style={[
-                  styles.checkoutTipChip,
-                  committed === opt.cents && styles.checkoutTipChipSelected,
-                ]}
-                onPress={() => {
-                  flushDebounce();
-                  setInTripTipCustom(false);
-                  setInTripCustomTipText("");
-                  void submitInTripTip(opt.cents);
-                }}
-                disabled={tipDisabled}
-              >
-                <Text
-                  style={[
-                    styles.checkoutTipChipText,
-                    committed === opt.cents && styles.checkoutTipChipTextSelected,
-                  ]}
+            ) : (
+              <View style={styles.checkoutTipChips}>
+                {checkoutTipPresetChips.map((opt) => (
+                  <Pressable
+                    key={opt.key}
+                    style={[
+                      styles.checkoutTipChip,
+                      committed === opt.cents && styles.checkoutTipChipSelected,
+                    ]}
+                    onPress={() => {
+                      flushDebounce();
+                      setInTripTipCustom(false);
+                      setInTripCustomTipText("");
+                      void submitInTripTip(opt.cents);
+                    }}
+                    disabled={tipDisabled}
+                  >
+                    <Text
+                      style={[
+                        styles.checkoutTipChipText,
+                        committed === opt.cents && styles.checkoutTipChipTextSelected,
+                      ]}
+                    >
+                      {opt.label}
+                    </Text>
+                  </Pressable>
+                ))}
+                <Pressable
+                  style={styles.checkoutTipChip}
+                  onPress={() => {
+                    flushDebounce();
+                    setInTripTipCustom(true);
+                    setInTripSuggestedExpanded(false);
+                    setInTripCustomTipText(committed > 0 ? (committed / 100).toFixed(2) : "");
+                  }}
+                  disabled={tipDisabled}
                 >
-                  {opt.label}
-                </Text>
-              </Pressable>
-            ))}
-            <Pressable
-              style={styles.checkoutTipChip}
-              onPress={() => {
-                flushDebounce();
-                setInTripTipCustom(true);
-                setInTripSuggestedExpanded(false);
-                setInTripCustomTipText(committed > 0 ? (committed / 100).toFixed(2) : "");
-              }}
-              disabled={tipDisabled}
-            >
-              <Text style={styles.checkoutTipChipText}>Custom</Text>
-            </Pressable>
-          </View>
+                  <Text style={styles.checkoutTipChipText}>Custom</Text>
+                </Pressable>
+              </View>
+            )}
+            <Text style={styles.checkoutMaxTipNote}>
+              Max tip for this ride: ${(checkoutMaxTipCents / 100).toFixed(2)}
+              {inTripTipBusy ? " · Saving…" : ""}
+            </Text>
+          </>
         )}
-        <Text style={styles.checkoutMaxTipNote}>
-          Max tip for this ride: ${(checkoutMaxTipCents / 100).toFixed(2)}
-          {inTripTipBusy ? " · Saving…" : ""}
-        </Text>
       </View>
     );
   };
@@ -5108,6 +5153,29 @@ const styles = StyleSheet.create({
     borderTopWidth: 1,
     borderTopColor: "#e2e8f0",
   },
+  inTripTipCollapsedBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+    backgroundColor: "#f8fafc",
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: "#e2e8f0",
+  },
+  inTripTipCollapsedTextCol: { flex: 1, paddingRight: 12 },
+  inTripTipCollapsedTitle: { fontSize: 16, ...pj.sb, color: "#0f172a" },
+  inTripTipCollapsedSub: { fontSize: 13, ...pj.r, color: "#64748b", marginTop: 4, lineHeight: 18 },
+  inTripTipDoneRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "flex-end",
+    gap: 6,
+    marginBottom: 10,
+    paddingVertical: 4,
+  },
+  inTripTipDoneText: { fontSize: 15, ...pj.m, color: "#2563eb" },
   inTripTipTitle: { fontSize: 16, ...pj.sb, color: "#0f172a" },
   inTripTipCustomTop: { marginTop: 8 },
   checkoutSuggestedCollapsed: {
