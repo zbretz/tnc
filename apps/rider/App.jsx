@@ -358,6 +358,19 @@ function riderAcceptedInProgressBannerCopy(trip, driverCoord) {
   return "Waiting for driver location…";
 }
 
+/** Short map-overlay label for active trip phases (rider). */
+function riderTripPhaseIndicatorLabel(trip) {
+  const st = trip?.status;
+  if (st === "requested") return "Finding a driver";
+  if (st === "awaiting_rider_checkout") return "Complete payment";
+  if (st === "in_progress") return "Trip in progress";
+  if (st === "accepted") {
+    if (trip?.driverArrivedAtPickupAt) return "Driver arrived";
+    return "Driver on the way";
+  }
+  return "Trip";
+}
+
 const RIDER_MAP_CHROME_TOP =
   Platform.OS === "ios" ? 52 : Platform.OS === "android" ? 50 : 14;
 const RIDER_SETTINGS_TOP =
@@ -3883,9 +3896,23 @@ export default function App() {
         </Modal>
       ) : null}
       <View style={mapWrapperStyle}>
-        {riderService.fareFreeEnabled ? (
+        {riderService.fareFreeEnabled ||
+        (trip && RIDER_TRIP_MAP_STATUSES.includes(trip.status)) ? (
           <View style={styles.mapStyleBar} pointerEvents="box-none">
-            <FreeRideBanner onPressWhy={() => setFreeRideWhyOpen(true)} />
+            {riderService.fareFreeEnabled ? (
+              <FreeRideBanner onPressWhy={() => setFreeRideWhyOpen(true)} />
+            ) : null}
+            {trip && RIDER_TRIP_MAP_STATUSES.includes(trip.status) ? (
+              <View style={styles.riderTripPhasePillRow} pointerEvents="none">
+                <View
+                  style={styles.riderTripPhasePill}
+                  accessibilityRole="text"
+                  accessibilityLabel={riderTripPhaseIndicatorLabel(trip)}
+                >
+                  <Text style={styles.riderTripPhasePillText}>{riderTripPhaseIndicatorLabel(trip)}</Text>
+                </View>
+              </View>
+            ) : null}
           </View>
         ) : null}
         <View style={StyleSheet.absoluteFill} collapsable={false}>
@@ -5255,7 +5282,20 @@ const styles = StyleSheet.create({
     left: 10,
     right: 56,
     zIndex: 18,
+    gap: 8,
   },
+  riderTripPhasePillRow: { alignItems: "center" },
+  riderTripPhasePill: {
+    alignSelf: "center",
+    maxWidth: "100%",
+    backgroundColor: "#0f172a",
+    paddingVertical: 8,
+    paddingHorizontal: 16,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.12)",
+  },
+  riderTripPhasePillText: { fontSize: 14, ...pj.sb, color: "#fff", textAlign: "center" },
   banner: {
     backgroundColor: "#eff6ff",
     padding: 12,

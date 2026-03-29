@@ -234,6 +234,28 @@ function chordDrivingLine(trip, me, enRouteDropoff) {
   ];
 }
 
+function formatLegEtaLine(eta) {
+  if (!eta) return null;
+  const dur = eta.durationText || (eta.summaryMinutes != null ? `~${eta.summaryMinutes} min` : null);
+  if (!dur) return null;
+  const bits = [dur];
+  if (eta.distanceText) bits.push(eta.distanceText);
+  if (eta.usesTraffic) bits.push("live traffic");
+  return bits.join(" · ");
+}
+
+/** Short map-overlay label for active trip phases (driver). */
+function driverTripPhaseIndicatorLabel(trip) {
+  const st = trip?.status;
+  if (st === "awaiting_rider_checkout") return "Waiting for payment";
+  if (st === "in_progress") return "Trip in progress";
+  if (st === "accepted") {
+    if (trip?.driverArrivedAtPickupAt) return "At pickup";
+    return "Heading to pickup";
+  }
+  return "Active ride";
+}
+
 export default function App() {
   const [token, setToken] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -1076,7 +1098,7 @@ export default function App() {
     return (
       <View style={styles.container}>
         <StatusBar style="dark" />
-        <View style={styles.mapStyleBar} pointerEvents="box-none">
+        <View style={styles.driverMapTopChrome} pointerEvents="box-none">
           <View style={styles.mapStyleChips} pointerEvents="auto">
             {MAP_STYLE_OPTIONS.map((opt) => {
               const active = mapStyleId === opt.id;
@@ -1090,6 +1112,15 @@ export default function App() {
                 </Pressable>
               );
             })}
+          </View>
+          <View style={styles.driverTripPhasePillRow} pointerEvents="none">
+            <View
+              style={styles.driverTripPhasePill}
+              accessibilityRole="text"
+              accessibilityLabel={driverTripPhaseIndicatorLabel(activeTrip)}
+            >
+              <Text style={styles.driverTripPhasePillText}>{driverTripPhaseIndicatorLabel(activeTrip)}</Text>
+            </View>
           </View>
         </View>
         <MapView
@@ -1130,65 +1161,105 @@ export default function App() {
           ) : null}
         </MapView>
         <View style={styles.overlay}>
-          <Text style={styles.banner}>
-            {activeTrip.status === "awaiting_rider_checkout"
-              ? `Waiting for rider to confirm tip & payment in their app.\nPickup: ${pickupLabel(activeTrip)}${dropoffLabel(activeTrip) ? `\nDropoff: ${dropoffLabel(activeTrip)}` : ""}`
-              : enRouteDropoff
-                ? "En route to dropoff — map shows you and the destination only. Purple line: remaining leg."
-                : "En route to pickup — map shows you and the rider pickup (dropoff is not used to frame the map). Purple line shows your pickup approach."}
-            {activeTrip.status === "awaiting_rider_checkout"
-              ? ""
-              : `\nPickup: ${pickupLabel(activeTrip)}${dropoffLabel(activeTrip) ? `\nDropoff: ${dropoffLabel(activeTrip)}` : ""}`}
-            {activeTrip.status === "awaiting_rider_checkout"
-              ? ""
-              : !enRouteDropoff && activeTrip?.etaToPickup
-                ? `\nETA to pickup: ${activeTrip.etaToPickup.durationText || `~${activeTrip.etaToPickup.summaryMinutes} min`}${activeTrip.etaToPickup.distanceText ? ` · ${activeTrip.etaToPickup.distanceText}` : ""}${activeTrip.etaToPickup.usesTraffic ? " (traffic)" : ""}`
-                : !enRouteDropoff && me
-                  ? "\nETA to pickup: updating…"
-                  : ""}
-            {activeTrip.status === "awaiting_rider_checkout"
-              ? ""
-              : enRouteDropoff && activeTrip?.etaToDropoff
-                ? `\nETA to dropoff: ${activeTrip.etaToDropoff.durationText || `~${activeTrip.etaToDropoff.summaryMinutes} min`}${activeTrip.etaToDropoff.distanceText ? ` · ${activeTrip.etaToDropoff.distanceText}` : ""}${activeTrip.etaToDropoff.usesTraffic ? " (traffic)" : ""}`
-                : enRouteDropoff && me
-                  ? "\nETA to dropoff: updating…"
-                  : ""}
-          </Text>
-          <View style={styles.row}>
-            {Platform.OS !== "web" ? (
+          <View style={styles.activeTripCard}>
+            {activeTrip.status === "awaiting_rider_checkout" ? (
               <>
-                {!enRouteDropoff ? (
-                  <Pressable style={styles.smallBtn} onPress={() => void openInAppNavigatePickupFor(activeTrip)}>
-                    <Text style={styles.smallBtnText}>Navigate: pickup</Text>
-                  </Pressable>
+                <Text style={styles.activeTripWaitTitle}>Waiting for rider</Text>
+                <Text style={styles.activeTripSub}>
+                  They’re confirming tip and payment in their app. Stay nearby.
+                </Text>
+                <Text style={styles.activeTripAddrLabel}>Pickup</Text>
+                <Text style={styles.activeTripAddr}>{pickupLabel(activeTrip)}</Text>
+                {dropoffLabel(activeTrip) ? (
+                  <>
+                    <Text style={[styles.activeTripAddrLabel, styles.activeTripAddrLabelSpaced]}>Dropoff</Text>
+                    <Text style={styles.activeTripAddr}>{dropoffLabel(activeTrip)}</Text>
+                  </>
                 ) : null}
-                {enRouteDropoff && hasDrop ? (
-                  <Pressable style={styles.smallBtn} onPress={() => void openInAppNavigateDropoffFor(activeTrip)}>
-                    <Text style={styles.smallBtnText}>Navigate: dropoff</Text>
+                {Platform.OS !== "web" && hasDrop ? (
+                  <Pressable
+                    style={[styles.primaryNavBtn, styles.primaryNavBtnSpaced]}
+                    onPress={() => void openInAppNavigateDropoffFor(activeTrip)}
+                  >
+                    <Text style={styles.primaryNavBtnText}>Head to dropoff</Text>
                   </Pressable>
                 ) : null}
               </>
-            ) : null}
+            ) : enRouteDropoff ? (
+              <>
+                <Text style={styles.activeTripLegLabel}>Dropoff</Text>
+                <Text style={styles.activeTripEta}>
+                  {formatLegEtaLine(activeTrip?.etaToDropoff) ||
+                    (me ? "Getting ETA…" : "ETA when location is on")}
+                </Text>
+                <Text style={styles.activeTripAddr}>{dropoffLabel(activeTrip) || "No dropoff set"}</Text>
+                {Platform.OS !== "web" && hasDrop ? (
+                  <Pressable
+                    style={[styles.primaryNavBtn, styles.primaryNavBtnSpaced]}
+                    onPress={() => void openInAppNavigateDropoffFor(activeTrip)}
+                  >
+                    <Text style={styles.primaryNavBtnText}>Head to dropoff</Text>
+                  </Pressable>
+                ) : null}
+              </>
+            ) : (
+              <>
+                <Text style={styles.activeTripLegLabel}>Pickup</Text>
+                <Text style={styles.activeTripEta}>
+                  {formatLegEtaLine(activeTrip?.etaToPickup) ||
+                    (me ? "Getting ETA…" : "ETA when location is on")}
+                </Text>
+                <Text style={styles.activeTripAddr}>{pickupLabel(activeTrip)}</Text>
+                {dropoffLabel(activeTrip) ? (
+                  <Text style={styles.activeTripAddrSecondary}>Then · {dropoffLabel(activeTrip)}</Text>
+                ) : null}
+                {activeTrip.status === "accepted" && Platform.OS !== "web" && !activeTrip.driverArrivedAtPickupAt ? (
+                  <Pressable
+                    style={[styles.primaryNavBtn, styles.primaryNavBtnSpaced]}
+                    onPress={() => void openInAppNavigatePickupFor(activeTrip)}
+                  >
+                    <Text style={styles.primaryNavBtnText}>Head to pickup</Text>
+                  </Pressable>
+                ) : null}
+                {activeTrip.status === "accepted" && activeTrip.driverArrivedAtPickupAt ? (
+                  <Pressable
+                    style={[styles.primaryActionBtn, styles.primaryNavBtnSpaced, busy && styles.btnDisabled]}
+                    onPress={startRide}
+                    disabled={busy}
+                  >
+                    <Text style={styles.primaryNavBtnText}>{busy ? "Working…" : "Start trip"}</Text>
+                  </Pressable>
+                ) : null}
+                {activeTrip.status === "accepted" && !activeTrip.driverArrivedAtPickupAt ? (
+                  <Pressable
+                    style={[
+                      Platform.OS === "web" ? styles.primaryActionBtn : styles.secondaryTripBtn,
+                      Platform.OS === "web" ? styles.primaryNavBtnSpaced : { marginTop: 10 },
+                      (busy || arrivedPickupBusy) && styles.btnDisabled,
+                    ]}
+                    onPress={() => void postDriverArrivedAtPickup(String(activeTrip._id))}
+                    disabled={busy || arrivedPickupBusy}
+                  >
+                    <Text
+                      style={
+                        Platform.OS === "web" ? styles.primaryNavBtnText : styles.secondaryTripBtnText
+                      }
+                    >
+                      {arrivedPickupBusy ? "Sending…" : "I’ve arrived"}
+                    </Text>
+                  </Pressable>
+                ) : null}
+                {activeTrip.status === "accepted" && activeTrip.driverArrivedAtPickupAt && Platform.OS !== "web" ? (
+                  <Pressable
+                    style={styles.tertiaryNavLink}
+                    onPress={() => void openInAppNavigatePickupFor(activeTrip)}
+                  >
+                    <Text style={styles.tertiaryNavLinkText}>Open pickup navigation again</Text>
+                  </Pressable>
+                ) : null}
+              </>
+            )}
           </View>
-          {activeTrip.status === "accepted" ? (
-            <View style={styles.row}>
-              {!activeTrip.driverArrivedAtPickupAt ? (
-                <Pressable
-                  style={[styles.smallBtn, styles.arrivedPickupBtn]}
-                  onPress={() => void postDriverArrivedAtPickup(String(activeTrip._id))}
-                  disabled={busy || arrivedPickupBusy}
-                >
-                  <Text style={styles.smallBtnTextLight}>
-                    {arrivedPickupBusy ? "Sending…" : "Arrived"}
-                  </Text>
-                </Pressable>
-              ) : (
-                <Pressable style={[styles.smallBtn, styles.acceptSmall]} onPress={startRide} disabled={busy}>
-                  <Text style={styles.smallBtnTextLight}>{busy ? "Working…" : "Start trip"}</Text>
-                </Pressable>
-              )}
-            </View>
-          ) : null}
           <View style={styles.row}>
             <Pressable style={[styles.smallBtn, styles.warn]} onPress={cancelTrip} disabled={busy}>
               <Text style={styles.smallBtnTextLight}>Clear ride</Text>
@@ -1816,6 +1887,26 @@ const styles = StyleSheet.create({
     right: 12,
     zIndex: 18,
   },
+  driverMapTopChrome: {
+    position: "absolute",
+    top: 56,
+    left: 12,
+    right: 12,
+    zIndex: 18,
+    gap: 8,
+  },
+  driverTripPhasePillRow: { alignItems: "center" },
+  driverTripPhasePill: {
+    alignSelf: "center",
+    maxWidth: "100%",
+    backgroundColor: "#0f172a",
+    paddingVertical: 8,
+    paddingHorizontal: 16,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.12)",
+  },
+  driverTripPhasePillText: { fontSize: 14, ...pj.sb, color: "#fff", textAlign: "center" },
   mapStyleChips: {
     flexDirection: "row",
     flexWrap: "wrap",
@@ -1842,6 +1933,78 @@ const styles = StyleSheet.create({
     fontSize: 14,
     ...pj.r,
   },
+  activeTripCard: {
+    backgroundColor: "rgba(255,255,255,0.97)",
+    paddingVertical: 14,
+    paddingHorizontal: 16,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: "rgba(226,232,240,0.9)",
+    shadowColor: "#0f172a",
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.08,
+    shadowRadius: 8,
+    elevation: 3,
+  },
+  activeTripLegLabel: {
+    fontSize: 12,
+    ...pj.sb,
+    color: "#64748b",
+    letterSpacing: 0.6,
+    textTransform: "uppercase",
+    marginBottom: 4,
+  },
+  activeTripEta: {
+    fontSize: 28,
+    ...pj.b,
+    color: "#0f172a",
+    marginBottom: 10,
+    lineHeight: 34,
+  },
+  activeTripAddrLabel: { fontSize: 12, ...pj.sb, color: "#64748b", marginBottom: 2 },
+  activeTripAddrLabelSpaced: { marginTop: 10 },
+  activeTripAddr: { fontSize: 15, ...pj.r, color: "#334155", lineHeight: 22 },
+  activeTripAddrSecondary: {
+    fontSize: 13,
+    ...pj.r,
+    color: "#64748b",
+    marginTop: 6,
+    lineHeight: 18,
+  },
+  activeTripWaitTitle: { fontSize: 17, ...pj.b, color: "#0f172a", marginBottom: 4 },
+  activeTripSub: { fontSize: 13, ...pj.r, color: "#64748b", lineHeight: 18, marginBottom: 12 },
+  primaryNavBtn: {
+    backgroundColor: "#5b21b6",
+    paddingVertical: 14,
+    paddingHorizontal: 16,
+    borderRadius: 12,
+    alignItems: "center",
+    alignSelf: "stretch",
+  },
+  primaryNavBtnSpaced: { marginTop: 12 },
+  primaryNavBtnText: { fontSize: 17, ...pj.b, color: "#fff" },
+  primaryActionBtn: {
+    backgroundColor: "#059669",
+    paddingVertical: 14,
+    paddingHorizontal: 16,
+    borderRadius: 12,
+    alignItems: "center",
+    alignSelf: "stretch",
+  },
+  secondaryTripBtn: {
+    marginTop: 10,
+    alignSelf: "stretch",
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+    borderRadius: 12,
+    borderWidth: 2,
+    borderColor: "#047857",
+    backgroundColor: "#fff",
+    alignItems: "center",
+  },
+  secondaryTripBtnText: { fontSize: 16, ...pj.sb, color: "#047857" },
+  tertiaryNavLink: { marginTop: 10, alignSelf: "center", paddingVertical: 6, paddingHorizontal: 8 },
+  tertiaryNavLinkText: { fontSize: 14, ...pj.sb, color: "#5b21b6" },
   row: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
   smallBtn: {
     backgroundColor: "rgba(255,255,255,0.95)",
