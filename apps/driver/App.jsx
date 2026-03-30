@@ -282,6 +282,14 @@ export default function App() {
   const inAppNavTargetRef = useRef(null);
   inAppNavTargetRef.current = inAppNavTarget;
   const [arrivedPickupBusy, setArrivedPickupBusy] = useState(false);
+  /** After first in-app "Head to dropoff" for this trip, card shows Complete + return to nav. */
+  const [dropoffNavOpenedTripId, setDropoffNavOpenedTripId] = useState(null);
+  /** Full-screen overlay while completing a ride until the open-requests list is ready. */
+  const [completingTrip, setCompletingTrip] = useState(false);
+
+  useEffect(() => {
+    setDropoffNavOpenedTripId(null);
+  }, [activeTrip?._id]);
 
   useEffect(() => {
     setInAppNavTarget((prev) => {
@@ -378,6 +386,7 @@ export default function App() {
         signalPickupArrivalOnArrived: false,
         showArrivalChrome: true,
       });
+      if (t?._id != null) setDropoffNavOpenedTripId(String(t._id));
     },
     [dropoffLabel]
   );
@@ -822,26 +831,22 @@ export default function App() {
     if (!token || !activeTrip) return;
     if (activeTrip.status === "awaiting_rider_checkout") return;
     setBusy(true);
+    setCompletingTrip(true);
     try {
-      const data = await api(`/trips/${activeTrip._id}/complete`, {
+      await api(`/trips/${activeTrip._id}/complete`, {
         method: "POST",
         token,
       });
-      const t = data?.trip;
-      if (t && t.status === "awaiting_rider_checkout") {
-        setActiveTrip((prev) => {
-          if (!prev || String(prev._id) !== String(t._id)) return t;
-          return { ...prev, ...t };
-        });
-      } else {
-        setActiveTrip(null);
-        setMe(null);
-        await loadAvailable(token);
-      }
+      closeInAppNav();
+      setActiveTrip(null);
+      setMe(null);
+      setPreviewTrip(null);
+      await loadAvailable(token);
     } catch (e) {
       Alert.alert("Complete failed", String(e));
     } finally {
       setBusy(false);
+      setCompletingTrip(false);
     }
   };
 
@@ -1094,6 +1099,12 @@ export default function App() {
     const activeChord = chordDrivingLine(activeTrip, me, enRouteDropoff);
     const activeLineCoords =
       activeDrivingCoords?.length >= 2 ? activeDrivingCoords : activeChord;
+    const dropoffNavLaunchedThisTrip =
+      Platform.OS !== "web" &&
+      hasDrop &&
+      activeTrip.status === "in_progress" &&
+      dropoffNavOpenedTripId != null &&
+      String(dropoffNavOpenedTripId) === String(activeTrip._id);
 
     return (
       <View style={styles.container}>
@@ -1193,13 +1204,31 @@ export default function App() {
                     (me ? "Getting ETA…" : "ETA when location is on")}
                 </Text>
                 <Text style={styles.activeTripAddr}>{dropoffLabel(activeTrip) || "No dropoff set"}</Text>
-                {Platform.OS !== "web" && hasDrop ? (
-                  <Pressable
-                    style={[styles.primaryNavBtn, styles.primaryNavBtnSpaced]}
-                    onPress={() => void openInAppNavigateDropoffFor(activeTrip)}
-                  >
-                    <Text style={styles.primaryNavBtnText}>Head to dropoff</Text>
-                  </Pressable>
+                {Platform.OS !== "web" && hasDrop && activeTrip.status === "in_progress" ? (
+                  dropoffNavLaunchedThisTrip ? (
+                    <>
+                      <Pressable
+                        style={[styles.primaryCompleteTripBtn, styles.primaryNavBtnSpaced, busy && styles.btnDisabled]}
+                        onPress={completeTrip}
+                        disabled={busy}
+                      >
+                        <Text style={styles.primaryNavBtnText}>Complete trip</Text>
+                      </Pressable>
+                      <Pressable
+                        style={styles.tertiaryNavLink}
+                        onPress={() => void openInAppNavigateDropoffFor(activeTrip)}
+                      >
+                        <Text style={styles.tertiaryNavLinkText}>Return to navigation</Text>
+                      </Pressable>
+                    </>
+                  ) : (
+                    <Pressable
+                      style={[styles.primaryNavBtn, styles.primaryNavBtnSpaced]}
+                      onPress={() => void openInAppNavigateDropoffFor(activeTrip)}
+                    >
+                      <Text style={styles.primaryNavBtnText}>Head to dropoff</Text>
+                    </Pressable>
+                  )
                 ) : null}
               </>
             ) : (
@@ -1264,7 +1293,7 @@ export default function App() {
             <Pressable style={[styles.smallBtn, styles.warn]} onPress={cancelTrip} disabled={busy}>
               <Text style={styles.smallBtnTextLight}>Clear ride</Text>
             </Pressable>
-            {activeTrip.status === "in_progress" ? (
+            {activeTrip.status === "in_progress" && !dropoffNavLaunchedThisTrip ? (
               <Pressable style={[styles.smallBtn, styles.danger]} onPress={completeTrip} disabled={busy}>
                 <Text style={styles.smallBtnTextLight}>Complete trip</Text>
               </Pressable>
@@ -1275,6 +1304,16 @@ export default function App() {
           </View>
         </View>
         {inAppNavModal}
+        {completingTrip ? (
+          <View
+            style={styles.completingTripOverlay}
+            pointerEvents="auto"
+            accessibilityLabel="Finishing trip"
+            accessibilityLiveRegion="polite"
+          >
+            <ActivityIndicator size="large" color="#facc15" />
+          </View>
+        ) : null}
       </View>
     );
   }
@@ -1641,6 +1680,16 @@ export default function App() {
         <Text style={styles.footerBtnText}>Log out</Text>
       </Pressable>
       {inAppNavModal}
+      {completingTrip ? (
+        <View
+          style={styles.completingTripOverlay}
+          pointerEvents="auto"
+          accessibilityLabel="Finishing trip"
+          accessibilityLiveRegion="polite"
+        >
+          <ActivityIndicator size="large" color="#facc15" />
+        </View>
+      ) : null}
     </View>
   );
 }
@@ -1673,6 +1722,13 @@ const styles = StyleSheet.create({
   title: { fontSize: 24, ...pj.b, marginBottom: 8 },
   apiHint: { fontSize: 11, ...pj.r, color: "#64748b", marginBottom: 12 },
   container: { flex: 1 },
+  completingTripOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: "rgba(15, 23, 42, 0.45)",
+    justifyContent: "center",
+    alignItems: "center",
+    zIndex: 200,
+  },
   listWrap: { flex: 1, paddingTop: 56, paddingHorizontal: 16, backgroundColor: "#f8fafc" },
   signedInLine: { fontSize: 13, ...pj.r, color: "#475569", marginBottom: 10 },
   adminEntry: { marginBottom: 12 },
@@ -1985,6 +2041,14 @@ const styles = StyleSheet.create({
   primaryNavBtnText: { fontSize: 17, ...pj.b, color: "#fff" },
   primaryActionBtn: {
     backgroundColor: "#059669",
+    paddingVertical: 14,
+    paddingHorizontal: 16,
+    borderRadius: 12,
+    alignItems: "center",
+    alignSelf: "stretch",
+  },
+  primaryCompleteTripBtn: {
+    backgroundColor: "#dc2626",
     paddingVertical: 14,
     paddingHorizontal: 16,
     borderRadius: 12,
