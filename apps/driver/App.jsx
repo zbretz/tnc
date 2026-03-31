@@ -22,13 +22,13 @@ import {
 } from "@expo-google-fonts/plus-jakarta-sans";
 import { useFonts } from "expo-font";
 import * as SplashScreen from "expo-splash-screen";
-import { DropoffBeaconMarker, PickupBeaconMarker, FONT_FAMILY } from "@tnc/shared";
+import { DropoffBeaconMarker, PickupBeaconMarker, FONT_FAMILY, fetchApiHealth } from "@tnc/shared";
 import MapView, { Marker, Polyline, PROVIDER_GOOGLE } from "react-native-maps";
 import * as Location from "expo-location";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { io } from "socket.io-client";
 import { StatusBar } from "expo-status-bar";
-import Slider from "@react-native-community/slider";
+import FarePercentSlider from "./components/FarePercentSlider";
 import { getApiUrl } from "./lib/config";
 import DriverInAppNavigationModal from "./DriverInAppNavigationModal";
 
@@ -286,6 +286,25 @@ export default function App() {
   const [dropoffNavOpenedTripId, setDropoffNavOpenedTripId] = useState(null);
   /** Full-screen overlay while completing a ride until the open-requests list is ready. */
   const [completingTrip, setCompletingTrip] = useState(false);
+  /** Pre-login: GET /health against configured API. */
+  const [apiHealth, setApiHealth] = useState(null);
+
+  const retryApiHealth = useCallback(() => {
+    setApiHealth("loading");
+    fetchApiHealth(getApiUrl()).then(setApiHealth);
+  }, []);
+
+  useEffect(() => {
+    if (token) return undefined;
+    let cancelled = false;
+    setApiHealth("loading");
+    fetchApiHealth(getApiUrl()).then((r) => {
+      if (!cancelled) setApiHealth(r);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [token]);
 
   useEffect(() => {
     setDropoffNavOpenedTripId(null);
@@ -1048,6 +1067,21 @@ export default function App() {
         <Text style={styles.apiHint} selectable>
           API: {getApiUrl()}
         </Text>
+        {apiHealth === "loading" ? (
+          <Text style={styles.apiHealthLine}>Checking server…</Text>
+        ) : apiHealth?.ok ? (
+          <Text style={styles.apiHealthOk}>Server reachable (GET /health)</Text>
+        ) : apiHealth ? (
+          <View style={styles.apiHealthBlock}>
+            <Text style={styles.apiHealthErr}>
+              Server check failed:{" "}
+              {typeof apiHealth.error === "string" ? apiHealth.error : "Unknown error"}
+            </Text>
+            <Pressable onPress={retryApiHealth} style={styles.apiHealthRetry} accessibilityRole="button">
+              <Text style={styles.apiHealthRetryText}>Retry</Text>
+            </Pressable>
+          </View>
+        ) : null}
         <Text style={styles.pickerHint}>
           Choose which driver you are (dev only). Seed accounts appear when the API runs with TNC_DEV_AUTH=1.
         </Text>
@@ -1569,7 +1603,7 @@ export default function App() {
                     <Text style={styles.fareAdjScaleMid}>100% baseline</Text>
                     <Text style={styles.fareAdjScaleEdge}>150%</Text>
                   </View>
-                  <Slider
+                  <FarePercentSlider
                     style={[styles.adminSlider, adminRiderCfg.fareFreeEnabled === true && styles.adminSliderDisabled]}
                     minimumValue={50}
                     maximumValue={150}
@@ -1721,6 +1755,12 @@ const styles = StyleSheet.create({
   pickerSpinner: { marginVertical: 12 },
   title: { fontSize: 24, ...pj.b, marginBottom: 8 },
   apiHint: { fontSize: 11, ...pj.r, color: "#64748b", marginBottom: 12 },
+  apiHealthLine: { fontSize: 12, ...pj.r, color: "#64748b", marginBottom: 10 },
+  apiHealthOk: { fontSize: 12, ...pj.sb, color: "#15803d", marginBottom: 10 },
+  apiHealthBlock: { marginBottom: 12, gap: 6 },
+  apiHealthErr: { fontSize: 12, ...pj.r, color: "#b91c1c", lineHeight: 17 },
+  apiHealthRetry: { alignSelf: "flex-start", paddingVertical: 6, paddingHorizontal: 4 },
+  apiHealthRetryText: { fontSize: 13, ...pj.sb, color: "#2563eb" },
   container: { flex: 1 },
   completingTripOverlay: {
     ...StyleSheet.absoluteFillObject,

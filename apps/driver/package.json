@@ -13,7 +13,6 @@
     "@expo/vector-icons": "^15.0.3",
     "@googlemaps/react-native-navigation-sdk": "0.13.0",
     "@react-native-async-storage/async-storage": "2.2.0",
-    "@react-native-community/slider": "5.0.1",
     "@tnc/shared": "*",
     "expo": "~54.0.0",
     "expo-build-properties": "~1.0.10",

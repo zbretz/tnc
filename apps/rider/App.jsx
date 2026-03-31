@@ -27,7 +27,7 @@ import {
 } from "@expo-google-fonts/plus-jakarta-sans";
 import { useFonts } from "expo-font";
 import * as SplashScreen from "expo-splash-screen";
-import { DropoffBeaconMarker, PickupBeaconMarker, FONT_FAMILY } from "@tnc/shared";
+import { DropoffBeaconMarker, PickupBeaconMarker, FONT_FAMILY, fetchApiHealth } from "@tnc/shared";
 import MapView, { Marker, Polyline, PROVIDER_GOOGLE } from "react-native-maps";
 import * as Location from "expo-location";
 import AsyncStorage from "@react-native-async-storage/async-storage";
@@ -712,6 +712,25 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   /** UI-only: shown once after new-user name step so you can preview the local-status flow. */
   const [showLocalStatusPreview, setShowLocalStatusPreview] = useState(false);
+  /** Pre-login: GET /health against configured API (see fetchApiHealth in @tnc/shared). */
+  const [apiHealth, setApiHealth] = useState(null);
+
+  const retryApiHealth = useCallback(() => {
+    setApiHealth("loading");
+    fetchApiHealth(getApiUrl()).then(setApiHealth);
+  }, []);
+
+  useEffect(() => {
+    if (token) return undefined;
+    let cancelled = false;
+    setApiHealth("loading");
+    fetchApiHealth(getApiUrl()).then((r) => {
+      if (!cancelled) setApiHealth(r);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [token]);
 
   useEffect(() => {
     setLoginOtpSent(false);
@@ -2999,6 +3018,21 @@ export default function App() {
             <Text style={styles.apiHint} selectable>
               API: {getApiUrl()}
             </Text>
+            {apiHealth === "loading" ? (
+              <Text style={styles.apiHealthLine}>Checking server…</Text>
+            ) : apiHealth?.ok ? (
+              <Text style={styles.apiHealthOk}>Server reachable (GET /health)</Text>
+            ) : apiHealth ? (
+              <View style={styles.apiHealthBlock}>
+                <Text style={styles.apiHealthErr}>
+                  Server check failed:{" "}
+                  {typeof apiHealth.error === "string" ? apiHealth.error : "Unknown error"}
+                </Text>
+                <Pressable onPress={retryApiHealth} style={styles.apiHealthRetry} accessibilityRole="button">
+                  <Text style={styles.apiHealthRetryText}>Retry</Text>
+                </Pressable>
+              </View>
+            ) : null}
             {riderService.fareFreeEnabled ? (
               <View style={styles.freeRideBannerAuthWrap}>
                 <FreeRideBanner onPressWhy={() => setFreeRideWhyOpen(true)} />
@@ -5199,6 +5233,12 @@ const styles = StyleSheet.create({
   },
   title: { fontSize: 24, ...pj.b, marginBottom: 8 },
   apiHint: { fontSize: 11, ...pj.r, color: "#64748b", marginBottom: 12 },
+  apiHealthLine: { fontSize: 12, ...pj.r, color: "#64748b", marginBottom: 10 },
+  apiHealthOk: { fontSize: 12, ...pj.sb, color: "#15803d", marginBottom: 10 },
+  apiHealthBlock: { marginBottom: 12, gap: 6 },
+  apiHealthErr: { fontSize: 12, ...pj.r, color: "#b91c1c", lineHeight: 17 },
+  apiHealthRetry: { alignSelf: "flex-start", paddingVertical: 6, paddingHorizontal: 4 },
+  apiHealthRetryText: { fontSize: 13, ...pj.sb, color: "#2563eb" },
   authHint: { fontSize: 14, ...pj.r, color: "#475569", marginBottom: 4, lineHeight: 20 },
   authOtpModalRoot: { flex: 1, backgroundColor: "#f8fafc" },
   authOtpModalScroll: {

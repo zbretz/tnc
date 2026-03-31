@@ -1,4 +1,5 @@
 export { DropoffBeaconMarker, PickupBeaconMarker } from "./BeaconMarkers.js";
+export { fetchApiHealth } from "./apiHealth.js";
 
 /** Shared string constants for trips and roles (optional import from apps). */
 export const TRIP_STATUSES = Object.freeze([

@@ -86,7 +86,7 @@ app.get("/config/rider", async (_req, res) => {
 });
 
 app.get("/health", (_req, res) => {
-  res.json({ ok: true });
+  res.json({ ok: true, service: "tnc-api" });
 });
 
 io.use((socket, next) => {
