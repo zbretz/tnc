@@ -26,6 +26,7 @@ import {
   PlusJakartaSans_800ExtraBold,
 } from "@expo-google-fonts/plus-jakarta-sans";
 import { useFonts } from "expo-font";
+import Constants, { ExecutionEnvironment } from "expo-constants";
 import * as SplashScreen from "expo-splash-screen";
 import { DropoffBeaconMarker, PickupBeaconMarker, FONT_FAMILY, fetchApiHealth } from "@tnc/shared";
 import MapView, { Marker, Polyline, PROVIDER_GOOGLE } from "react-native-maps";
@@ -36,9 +37,19 @@ import { StatusBar } from "expo-status-bar";
 import { Ionicons } from "@expo/vector-icons";
 import { CardField, useStripe } from "@stripe/stripe-react-native";
 import { getApiUrl, getGoogleGeocodingApiKey, getGooglePlacesApiKey, getStripePublishableKey } from "./lib/config";
+import { ParkCityRidesLaunchScreen } from "./components/ParkCityRidesLaunchScreen";
 import BottomSheet, { BottomSheetScrollView, BottomSheetTextInput } from "@gorhom/bottom-sheet";
 
 SplashScreen.preventAutoHideAsync().catch(() => {});
+
+/**
+ * Expo Go + New Architecture: forcing `PROVIDER_GOOGLE` on iOS uses native Google Maps code that
+ * is not wired the same as in a dev/standalone build, and `RCTLegacyViewManagerInterop` can abort
+ * when setting props. Dev clients and store builds keep Google; Expo Go uses the default provider
+ * (Apple Maps on iOS, Google on Android).
+ */
+const RIDER_MAP_VIEW_PROVIDER =
+  Constants.executionEnvironment === ExecutionEnvironment.StoreClient ? undefined : PROVIDER_GOOGLE;
 
 const TOKEN_KEY = "tnc_token";
 /** Persisted Mongo id string; re-fetch on cold start so reload does not drop the active trip. */
@@ -695,9 +706,9 @@ export default function App() {
     PlusJakartaSans_800ExtraBold,
   });
 
-  useEffect(() => {
-    if (fontsLoaded) SplashScreen.hideAsync().catch(() => {});
-  }, [fontsLoaded]);
+  useLayoutEffect(() => {
+    SplashScreen.hideAsync().catch(() => {});
+  }, []);
 
   const [token, setToken] = useState(null);
   const [loginPhone, setLoginPhone] = useState("");
@@ -3270,6 +3281,10 @@ export default function App() {
   const postCheckoutPaymentModalVisible = Boolean(trip && completedTripNeedsPaymentResolution(trip));
   const postCheckoutFareStatus = trip?.fareCharge?.status;
 
+  if (!fontsLoaded) {
+    return <ParkCityRidesLaunchScreen />;
+  }
+
   return (
     <View style={styles.container}>
       <StatusBar style="dark" />
@@ -3954,7 +3969,7 @@ export default function App() {
             key={`rmap-${riderMapMountKey}`}
             ref={mapRef}
             style={StyleSheet.absoluteFill}
-            provider={PROVIDER_GOOGLE}
+            provider={RIDER_MAP_VIEW_PROVIDER}
             initialRegion={trip ? tripMapInitialRegion ?? region : region}
             onMapReady={() => {
               if (trip) refitActiveTripCamera();

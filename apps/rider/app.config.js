@@ -73,6 +73,8 @@ module.exports = {
           "We use your location to set pickup and show the driver approaching.",
       },
     ],
+    /** After Expo `withMaps` — fixes GMSServices init order for the new AppDelegate template. */
+    "./plugins/withGoogleMapsEarlyInitAppDelegate",
   ],
   extra: {
     apiUrl: process.env.EXPO_PUBLIC_API_URL || "http://10.0.0.135:3000",

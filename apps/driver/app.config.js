@@ -39,6 +39,8 @@ module.exports = {
         NSAllowsLocalNetworking: true,
       },
       LSApplicationQueriesSchemes: ["comgooglemaps", "googlechromes"],
+      /** Read in AppDelegate for GMSServices.provideAPIKey (react-native-maps + Navigation). */
+      ...(googleMapsApiKey ? { GMSApiKey: googleMapsApiKey } : {}),
     },
     ...(googleMapsApiKey ? { config: { googleMapsApiKey } } : {}),
   },

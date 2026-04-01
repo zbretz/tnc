@@ -1,7 +1,7 @@
 import "react-native-gesture-handler";
 import { registerRootComponent } from "expo";
 import { useEffect, useState } from "react";
-import { ActivityIndicator, View } from "react-native";
+import { ParkCityRidesLaunchScreen } from "./components/ParkCityRidesLaunchScreen";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { StripeProvider } from "@stripe/stripe-react-native";
 import { getStripePublishableKey } from "./lib/config";
@@ -40,9 +40,7 @@ function Root() {
           <AppComponent />
         </StripeProvider>
       ) : (
-        <View style={{ flex: 1, justifyContent: "center", alignItems: "center", backgroundColor: "#fff" }}>
-          <ActivityIndicator size="large" color="#2563eb" />
-        </View>
+        <ParkCityRidesLaunchScreen />
       )}
     </GestureHandlerRootView>
   );
