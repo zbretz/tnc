@@ -25,6 +25,8 @@ module.exports = {
     bundleIdentifier: "com.tnc.driver",
     supportsTablet: true,
     infoPlist: {
+      NSPhotoLibraryUsageDescription: "Choose a photo for your driver profile picture.",
+      NSCameraUsageDescription: "Take a photo for your driver profile picture.",
       NSLocationWhenInUseUsageDescription:
         "We share your location with the rider after you accept a trip.",
       /**
