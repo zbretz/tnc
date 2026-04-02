@@ -109,13 +109,28 @@ function stripUndefined(obj) {
   return Object.fromEntries(Object.entries(obj).filter(([, v]) => v !== undefined));
 }
 
-function imageAssetToDataUrl(asset) {
-  const mime =
-    typeof asset?.mimeType === "string" && asset.mimeType.startsWith("image/")
-      ? asset.mimeType
-      : "image/jpeg";
-  if (!asset?.base64) throw new Error("Could not read image data. Try another photo.");
-  const dataUrl = `data:${mime};base64,${asset.base64}`;
+const S3_AVATAR_NOT_CONFIGURED = "s3_avatar_upload_not_configured";
+
+function base64ToUint8Array(b64) {
+  if (typeof globalThis.atob === "function") {
+    const binary = globalThis.atob(b64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return bytes;
+  }
+  if (typeof Buffer !== "undefined") {
+    const buf = Buffer.from(b64, "base64");
+    return new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
+  }
+  throw new Error("Cannot decode image on this platform.");
+}
+
+/**
+ * @param {{ base64: string, mimeType: string }} raw
+ * @returns {string}
+ */
+function rawToDataUrl(raw) {
+  const dataUrl = `data:${raw.mimeType};base64,${raw.base64}`;
   if (dataUrl.length > MAX_AVATAR_DATA_URL_LENGTH) {
     throw new Error("Photo is too large. Try a smaller image.");
   }
@@ -124,9 +139,9 @@ function imageAssetToDataUrl(asset) {
 
 /**
  * @param {"library" | "camera"} source
- * @returns {Promise<string | null>} data URL or null if cancelled
+ * @returns {Promise<{ base64: string, mimeType: string } | null>}
  */
-async function pickSquareImageAsDataUrl(source = "library") {
+async function pickSquareImageRaw(source = "library") {
   const opts = {
     mediaTypes: ImagePicker.MediaTypeOptions.Images,
     allowsEditing: true,
@@ -145,7 +160,42 @@ async function pickSquareImageAsDataUrl(source = "library") {
     result = await ImagePicker.launchImageLibraryAsync(opts);
   }
   if (result.canceled || !result.assets?.[0]) return null;
-  return imageAssetToDataUrl(result.assets[0]);
+  const asset = result.assets[0];
+  const mimeType =
+    typeof asset.mimeType === "string" && asset.mimeType.startsWith("image/")
+      ? asset.mimeType
+      : "image/jpeg";
+  if (!asset.base64) throw new Error("Could not read image data. Try another photo.");
+  return { base64: asset.base64, mimeType };
+}
+
+/**
+ * @param {{ token?: string | null, signupToken?: string | null, raw: { base64: string, mimeType: string } }} opts
+ * @returns {Promise<string>} public object URL
+ */
+async function presignAndPutDriverAvatar({ token, signupToken, raw }) {
+  const presign =
+    signupToken != null && String(signupToken).trim() !== ""
+      ? await api("/auth/otp/avatar-upload-url", {
+          method: "POST",
+          body: { signupToken: String(signupToken).trim(), contentType: raw.mimeType },
+        })
+      : await api("/auth/me/avatar-upload-url", {
+          method: "POST",
+          token,
+          body: { contentType: raw.mimeType },
+        });
+  const bytes = base64ToUint8Array(raw.base64);
+  const putRes = await fetch(presign.uploadUrl, {
+    method: "PUT",
+    headers: { "Content-Type": presign.contentType },
+    body: bytes,
+  });
+  if (!putRes.ok) {
+    const t = await putRes.text().catch(() => "");
+    throw new Error(t || `Upload failed (${putRes.status})`);
+  }
+  return presign.publicUrl;
 }
 
 async function api(path, opts = {}) {
@@ -554,12 +604,22 @@ export default function App() {
     const run = async (source) => {
       setAvatarUploadBusy(true);
       try {
-        const dataUrl = await pickSquareImageAsDataUrl(source);
-        if (!dataUrl) return;
+        const raw = await pickSquareImageRaw(source);
+        if (!raw) return;
+        let avatarUrl;
+        try {
+          avatarUrl = await presignAndPutDriverAvatar({ token, raw });
+        } catch (e) {
+          if (e?.message === S3_AVATAR_NOT_CONFIGURED) {
+            avatarUrl = rawToDataUrl(raw);
+          } else {
+            throw e;
+          }
+        }
         const { user } = await api("/auth/me", {
           method: "PATCH",
           token,
-          body: { avatarUrl: dataUrl },
+          body: { avatarUrl },
         });
         if (user && responseUserIsDriver(user)) setSessionUser(user);
         else await refreshSessionUser(token);
@@ -585,8 +645,21 @@ export default function App() {
     const run = async (source) => {
       setRegErr(null);
       try {
-        const dataUrl = await pickSquareImageAsDataUrl(source);
-        if (dataUrl) setRegAvatarUrl(dataUrl);
+        const raw = await pickSquareImageRaw(source);
+        if (!raw) return;
+        try {
+          const url = await presignAndPutDriverAvatar({
+            signupToken: pendingDriverSignupToken,
+            raw,
+          });
+          setRegAvatarUrl(url);
+        } catch (e) {
+          if (e?.message === S3_AVATAR_NOT_CONFIGURED) {
+            setRegAvatarUrl(rawToDataUrl(raw));
+          } else {
+            setRegErr(String(e?.message || e));
+          }
+        }
       } catch (e) {
         setRegErr(String(e?.message || e));
       }
@@ -600,7 +673,7 @@ export default function App() {
       { text: "Take photo", onPress: () => void run("camera") },
       { text: "Cancel", style: "cancel" },
     ]);
-  }, [busy]);
+  }, [busy, pendingDriverSignupToken]);
 
   useEffect(() => {
     (async () => {

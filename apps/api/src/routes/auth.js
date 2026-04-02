@@ -16,8 +16,11 @@ import {
 import { serializeUserMe } from "../serialize.js";
 import { normalizePhoneE164 } from "../lib/phone.js";
 import { DEV_SEED_DRIVER_EMAILS, DEV_SEED_DRIVER_EMAIL_SET } from "../seedDevDrivers.js";
+import { createAvatarPresignedPut, isAvatarS3Configured } from "../lib/s3AvatarPresign.js";
 
 const r = Router();
+
+const S3_AVATAR_NOT_CONFIGURED = "s3_avatar_upload_not_configured";
 
 const OTP_COOLDOWN_MS = 60_000;
 const OTP_TTL_MS = 10 * 60_000;
@@ -496,6 +499,70 @@ r.post("/dev/login", async (req, res) => {
   }
   const token = signToken(String(user._id), user);
   res.json({ token, user: await serializeUserMeForAuth(user) });
+});
+
+/**
+ * POST /auth/me/avatar-upload-url { contentType } — presigned PUT for driver avatar (Bearer).
+ */
+r.post("/me/avatar-upload-url", authMiddleware, async (req, res) => {
+  if (!isAvatarS3Configured()) {
+    res.status(501).json({ error: S3_AVATAR_NOT_CONFIGURED });
+    return;
+  }
+  const user = await User.findById(req.userId).exec();
+  if (!user || !userIsDriverDoc(user)) {
+    res.status(403).json({ error: "Drivers only" });
+    return;
+  }
+  try {
+    const out = await createAvatarPresignedPut({
+      keyPrefix: `avatars/drivers/${req.userId}`,
+      contentType: req.body?.contentType,
+    });
+    res.json(out);
+  } catch (e) {
+    if (e?.code === "INVALID_CONTENT_TYPE") {
+      res.status(400).json({ error: e.message });
+      return;
+    }
+    console.error("[tnc] POST /auth/me/avatar-upload-url", e);
+    res.status(500).json({ error: "Could not create upload URL" });
+  }
+});
+
+/**
+ * POST /auth/otp/avatar-upload-url { signupToken, contentType } — presign during driver signup (no JWT yet).
+ */
+r.post("/otp/avatar-upload-url", async (req, res) => {
+  if (!isAvatarS3Configured()) {
+    res.status(501).json({ error: S3_AVATAR_NOT_CONFIGURED });
+    return;
+  }
+  const rawTok = req.body?.signupToken;
+  if (typeof rawTok !== "string" || !rawTok.trim()) {
+    res.status(400).json({ error: "signupToken required" });
+    return;
+  }
+  try {
+    verifyDriverOtpSignupToken(rawTok.trim());
+  } catch {
+    res.status(401).json({ error: "Invalid or expired signup token" });
+    return;
+  }
+  try {
+    const out = await createAvatarPresignedPut({
+      keyPrefix: "avatars/driver-signup",
+      contentType: req.body?.contentType,
+    });
+    res.json(out);
+  } catch (e) {
+    if (e?.code === "INVALID_CONTENT_TYPE") {
+      res.status(400).json({ error: e.message });
+      return;
+    }
+    console.error("[tnc] POST /auth/otp/avatar-upload-url", e);
+    res.status(500).json({ error: "Could not create upload URL" });
+  }
 });
 
 r.get("/me", authMiddleware, async (req, res) => {
