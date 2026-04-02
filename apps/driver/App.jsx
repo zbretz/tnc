@@ -33,6 +33,7 @@ import { StatusBar } from "expo-status-bar";
 import * as ImagePicker from "expo-image-picker";
 import FarePercentSlider from "./components/FarePercentSlider";
 import { getApiUrl } from "./lib/config";
+import { registerExpoPushWithApi } from "./lib/expoPush";
 import DriverInAppNavigationModal from "./DriverInAppNavigationModal";
 
 const TOKEN_KEY = "tnc_token_driver";
@@ -417,6 +418,8 @@ export default function App() {
   /** Optional data URL sent with complete-driver-profile. */
   const [regAvatarUrl, setRegAvatarUrl] = useState(null);
   const [avatarUploadBusy, setAvatarUploadBusy] = useState(false);
+  const driverPushRegisteredRef = useRef(false);
+  const [driverAvailable, setDriverAvailable] = useState(false);
 
   const retryApiHealth = useCallback(() => {
     setApiHealth("loading");
@@ -687,6 +690,37 @@ export default function App() {
     if (token) refreshSessionUser(token);
     else setSessionUser(null);
   }, [token, refreshSessionUser]);
+
+  useEffect(() => {
+    if (sessionUser?.availableForRequests != null) {
+      setDriverAvailable(Boolean(sessionUser.availableForRequests));
+    }
+  }, [sessionUser?.availableForRequests]);
+
+  useEffect(() => {
+    if (!token || !sessionUser || !responseUserIsDriver(sessionUser)) {
+      driverPushRegisteredRef.current = false;
+      return;
+    }
+    if (driverPushRegisteredRef.current) return;
+    driverPushRegisteredRef.current = true;
+    void registerExpoPushWithApi({ api, authToken: token }).catch(() => {});
+  }, [token, sessionUser]);
+
+  const toggleDriverAvailable = useCallback(
+    async (v) => {
+      if (!token) return;
+      setDriverAvailable(v);
+      try {
+        await api("/auth/me", { method: "PATCH", token, body: { availableForRequests: v } });
+        await refreshSessionUser(token);
+      } catch (e) {
+        setDriverAvailable(!v);
+        Alert.alert("Could not update availability", String(e?.message || e));
+      }
+    },
+    [token, refreshSessionUser]
+  );
 
   useEffect(() => {
     const id = setInterval(() => setRequestRelativeTick((n) => n + 1), 30000);
@@ -2347,6 +2381,17 @@ export default function App() {
           </Pressable>
         </View>
       ) : null}
+      {token && sessionUser && responseUserIsDriver(sessionUser) ? (
+        <View style={styles.driverAvailableRow}>
+          <View style={{ flex: 1, marginRight: 12 }}>
+            <Text style={styles.driverAvailableLabel}>Available for requests</Text>
+            <Text style={styles.driverAvailableHint}>
+              When on, you can receive notifications for new ride requests (stay on duty only when working).
+            </Text>
+          </View>
+          <Switch value={driverAvailable} onValueChange={(v) => void toggleDriverAvailable(v)} />
+        </View>
+      ) : null}
       {sessionUser?.isAdmin ? (
         <View style={styles.adminEntry}>
           <Pressable style={styles.adminEntryBtn} onPress={() => setRiderAdminOpen(true)}>
@@ -2780,6 +2825,19 @@ const styles = StyleSheet.create({
   profilePhotoPlaceholderText: { fontSize: 22, ...pj.sb, color: "#94a3b8", marginTop: -2 },
   profilePhotoBtn: { flex: 1, paddingVertical: 4 },
   profilePhotoBtnText: { fontSize: 15, ...pj.sb, color: "#2563eb" },
+  driverAvailableRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginBottom: 14,
+    backgroundColor: "#fff",
+    borderRadius: 12,
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+    borderWidth: 1,
+    borderColor: "#e2e8f0",
+  },
+  driverAvailableLabel: { fontSize: 15, ...pj.sb, color: "#0f172a", marginBottom: 4 },
+  driverAvailableHint: { fontSize: 12, ...pj.r, color: "#64748b", lineHeight: 17 },
   adminEntry: { marginBottom: 12 },
   adminEntryBtn: {
     flexDirection: "row",

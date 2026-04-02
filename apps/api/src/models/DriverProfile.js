@@ -43,6 +43,11 @@ const driverProfileSchema = new mongoose.Schema(
       coordinates: { type: [Number] },
     },
     locationUpdatedAt: { type: Date },
+    /**
+     * When true, driver receives push for new open ride requests (and is "on duty" for notifications).
+     * Does not affect trip-in-progress alerts.
+     */
+    availableForRequests: { type: Boolean, default: false },
   },
   { timestamps: true }
 );

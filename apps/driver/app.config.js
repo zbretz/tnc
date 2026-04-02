@@ -86,8 +86,20 @@ module.exports = {
         cameraPermission: "Take a photo for your driver profile picture.",
       },
     ],
+    [
+      "expo-notifications",
+      {
+        sounds: [],
+        enableBackgroundRemoteNotifications: false,
+      },
+    ],
   ],
   extra: {
     apiUrl: process.env.EXPO_PUBLIC_API_URL || "http://10.0.0.135:3000",
+    ...(process.env.EXPO_PUBLIC_EAS_PROJECT_ID_DRIVER?.trim()
+      ? { eas: { projectId: process.env.EXPO_PUBLIC_EAS_PROJECT_ID_DRIVER.trim() } }
+      : process.env.EXPO_PUBLIC_EAS_PROJECT_ID?.trim()
+        ? { eas: { projectId: process.env.EXPO_PUBLIC_EAS_PROJECT_ID.trim() } }
+        : {}),
   },
 };

@@ -22,6 +22,11 @@ import { getStripe, stripeEnabled } from "../lib/stripe.js";
 import { effectiveRequirePaymentMethodToBook } from "../lib/paymentPolicy.js";
 import { reconcileTripFareChargeFromStripe } from "../lib/reconcileTripFareCharge.js";
 import { riderRetryTripFareCharge } from "../lib/retryTripFareCharge.js";
+import {
+  notifyRiderDriverAccepted,
+  notifyRiderDriverArrived,
+  notifyTripCancelled,
+} from "../lib/expoPush.js";
 
 const POPULATE_DRIVER = { path: "driver", select: "-passwordHash" };
 
@@ -126,6 +131,12 @@ export function createTripsRouter(deps) {
     }).catch((e) => console.error("[tnc] TripEvent cancel", e));
     const out = await loadTripSerialized(id);
     deps.onTripUpdated(out);
+    void notifyTripCancelled({
+      trip: out,
+      previousStatus: prev,
+      actorUserId: uid,
+      isDriverAdmin,
+    });
     res.json({ trip: out });
   }
 
@@ -309,6 +320,7 @@ export function createTripsRouter(deps) {
     const populated = await Trip.findById(updated._id).populate(POPULATE_DRIVER).exec();
     const out = serializeTrip(populated);
     deps.onTripUpdated(out);
+    void notifyRiderDriverAccepted(out);
     res.json({ trip: out });
   });
 
@@ -676,6 +688,7 @@ export function createTripsRouter(deps) {
     await trip.save();
     const out = await loadTripSerialized(id);
     deps.onTripUpdated(out);
+    void notifyRiderDriverArrived(out);
     res.json({ trip: out });
   });
 

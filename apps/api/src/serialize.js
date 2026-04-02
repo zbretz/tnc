@@ -85,6 +85,7 @@ export function serializeUserMe(user, driverProfile) {
   if (userIsDriver(user)) {
     base.driverPublic = serializeDriverPublic(user);
     if (driverProfile && typeof driverProfile === "object") {
+      base.availableForRequests = Boolean(driverProfile.availableForRequests);
       base.driverStatus = driverProfile.driverStatus || "pending";
       const lic = driverProfile.license;
       if (lic && typeof lic === "object") {

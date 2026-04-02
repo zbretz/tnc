@@ -29,6 +29,7 @@ import { routesRouter } from "./routes/routes.js";
 import { pricingRouter } from "./routes/pricing.js";
 import { paymentsRouter } from "./routes/payments.js";
 import { isTwilioOtpConfigured } from "./lib/twilioOtp.js";
+import { notifyDriversNewOpenRequest } from "./lib/expoPush.js";
 
 const PORT = Number(process.env.PORT) || 3000;
 
@@ -59,6 +60,7 @@ function emitTripRoom(tripId, event, payload) {
 const tripsRouter = createTripsRouter({
   onTripCreated(trip) {
     io.to("drivers").emit("trip:available", { trip });
+    void notifyDriversNewOpenRequest(trip);
   },
   onTripUpdated(trip) {
     emitTripRoom(trip._id, "trip:updated", { trip });

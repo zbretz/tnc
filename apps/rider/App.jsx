@@ -37,6 +37,7 @@ import { StatusBar } from "expo-status-bar";
 import { Ionicons } from "@expo/vector-icons";
 import { CardField, useStripe } from "@stripe/stripe-react-native";
 import { getApiUrl, getGoogleGeocodingApiKey, getGooglePlacesApiKey, getStripePublishableKey } from "./lib/config";
+import { registerExpoPushWithApi } from "./lib/expoPush";
 import { ParkCityRidesLaunchScreen } from "./components/ParkCityRidesLaunchScreen";
 import BottomSheet, { BottomSheetScrollView, BottomSheetTextInput } from "@gorhom/bottom-sheet";
 
@@ -721,6 +722,8 @@ export default function App() {
   const [signupFirstName, setSignupFirstName] = useState("");
   const [signupLastName, setSignupLastName] = useState("");
   const [busy, setBusy] = useState(false);
+  /** After first successful trip booking, prompt once for notification permission + register Expo token. */
+  const pushPromptAfterFirstBookRef = useRef(false);
   /** UI-only: shown once after new-user name step so you can preview the local-status flow. */
   const [showLocalStatusPreview, setShowLocalStatusPreview] = useState(false);
   /** Pre-login: GET /health against configured API (see fetchApiHealth in @tnc/shared). */
@@ -2321,6 +2324,10 @@ export default function App() {
           setDriverLive(null);
           setBusy(false);
           if (__DEV__) console.warn("[tnc rider] requestRide: setTrip dispatched");
+          if (!pushPromptAfterFirstBookRef.current) {
+            pushPromptAfterFirstBookRef.current = true;
+            void registerExpoPushWithApi({ api, authToken: token }).catch(() => {});
+          }
         });
       });
     } catch (e) {

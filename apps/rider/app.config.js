@@ -73,6 +73,13 @@ module.exports = {
           "We use your location to set pickup and show the driver approaching.",
       },
     ],
+    [
+      "expo-notifications",
+      {
+        sounds: [],
+        enableBackgroundRemoteNotifications: false,
+      },
+    ],
     /** After Expo `withMaps` — fixes GMSServices init order for the new AppDelegate template. */
     "./plugins/withGoogleMapsEarlyInitAppDelegate",
   ],
@@ -80,5 +87,8 @@ module.exports = {
     apiUrl: process.env.EXPO_PUBLIC_API_URL || "http://10.0.0.135:3000",
     googleGeocodingApiKey: process.env.EXPO_PUBLIC_GOOGLE_GEOCODING_API_KEY || "",
     stripePublishableKey,
+    ...(process.env.EXPO_PUBLIC_EAS_PROJECT_ID?.trim()
+      ? { eas: { projectId: process.env.EXPO_PUBLIC_EAS_PROJECT_ID.trim() } }
+      : {}),
   },
 };

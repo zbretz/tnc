@@ -2,7 +2,7 @@ import { Router } from "express";
 import crypto from "crypto";
 import bcrypt from "bcryptjs";
 import mongoose from "mongoose";
-import { User } from "../models/User.js";
+import { User, rolesFromUserDoc } from "../models/User.js";
 import { DriverProfile } from "../models/DriverProfile.js";
 import { OtpChallenge } from "../models/OtpChallenge.js";
 import {
@@ -18,6 +18,7 @@ import { normalizePhoneE164 } from "../lib/phone.js";
 import { DEV_SEED_DRIVER_EMAILS, DEV_SEED_DRIVER_EMAIL_SET } from "../seedDevDrivers.js";
 import { createAvatarPresignedPut, isAvatarS3Configured } from "../lib/s3AvatarPresign.js";
 import { sendOtpSms, isTwilioOtpConfigured } from "../lib/twilioOtp.js";
+import { registerPushDevice, removePushDevice } from "../lib/expoPush.js";
 
 const r = Router();
 
@@ -554,6 +555,66 @@ r.get("/me", authMiddleware, async (req, res) => {
   res.json({ user: await serializeUserMeForAuth(user) });
 });
 
+r.post("/me/push-token", authMiddleware, async (req, res) => {
+  const user = await User.findById(req.userId).lean().exec();
+  if (!user) {
+    res.status(404).json({ error: "Not found" });
+    return;
+  }
+  const roles = rolesFromUserDoc(user);
+  const app = req.body?.app;
+  const tokenStr = typeof req.body?.expoPushToken === "string" ? req.body.expoPushToken.trim() : "";
+  const platformRaw = typeof req.body?.platform === "string" ? req.body.platform.trim().toLowerCase() : "ios";
+  if (!tokenStr) {
+    res.status(400).json({ error: "expoPushToken required" });
+    return;
+  }
+  if (app !== "rider" && app !== "driver") {
+    res.status(400).json({ error: "app must be rider or driver" });
+    return;
+  }
+  if (app === "rider" && !roles.includes("rider")) {
+    res.status(403).json({ error: "Rider app notifications require rider role" });
+    return;
+  }
+  if (app === "driver" && !roles.includes("driver")) {
+    res.status(403).json({ error: "Driver app notifications require driver role" });
+    return;
+  }
+  const platform = ["ios", "android", "web"].includes(platformRaw) ? platformRaw : "ios";
+  try {
+    await registerPushDevice({
+      userId: user._id,
+      app,
+      platform,
+      expoPushToken: tokenStr,
+    });
+    res.status(201).json({ ok: true });
+  } catch (e) {
+    if (e?.code === "INVALID_TOKEN" || e?.code === "INVALID_APP") {
+      res.status(400).json({ error: e.message });
+      return;
+    }
+    console.error("[tnc] POST /me/push-token", e);
+    res.status(500).json({ error: "Could not save push token" });
+  }
+});
+
+r.delete("/me/push-token", authMiddleware, async (req, res) => {
+  const tokenStr =
+    typeof req.body?.expoPushToken === "string"
+      ? req.body.expoPushToken.trim()
+      : typeof req.query?.expoPushToken === "string"
+        ? String(req.query.expoPushToken).trim()
+        : "";
+  if (!tokenStr) {
+    res.status(400).json({ error: "expoPushToken required" });
+    return;
+  }
+  await removePushDevice(req.userId, tokenStr);
+  res.json({ ok: true });
+});
+
 r.patch("/me", authMiddleware, async (req, res) => {
   const user = await User.findById(req.userId).exec();
   if (!user) {
@@ -594,6 +655,11 @@ r.patch("/me", authMiddleware, async (req, res) => {
       }
       const prev = user.vehicle?.toObject?.() ?? user.vehicle ?? {};
       user.vehicle = { ...prev, ...veh };
+    }
+    if (req.body?.availableForRequests !== undefined) {
+      const v = req.body.availableForRequests;
+      const on = v === true || v === "true" || v === 1 || v === "1";
+      await DriverProfile.updateOne({ userId: user._id }, { $set: { availableForRequests: Boolean(on) } }).exec();
     }
   }
   if (user.role === "rider" && phoneIn !== undefined) {
