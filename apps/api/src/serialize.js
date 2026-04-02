@@ -96,9 +96,16 @@ export function serializeUserMe(user, driverProfile) {
               ? exp
               : "";
         const licNum = trimOrEmpty(lic.number);
-        if (licNum || expIso) {
+        const licStateRaw = trimOrEmpty(lic.state);
+        const licState = licStateRaw
+          ? licStateRaw.toUpperCase()
+          : licNum || expIso
+            ? "UT"
+            : "";
+        if (licNum || expIso || licState) {
           base.license = {
             ...(licNum ? { number: licNum } : {}),
+            ...(licState ? { state: licState } : {}),
             ...(expIso ? { expiry: expIso } : {}),
           };
         }

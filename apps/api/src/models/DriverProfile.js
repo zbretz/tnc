@@ -15,6 +15,8 @@ const vehicleSchema = new mongoose.Schema(
 const licenseSchema = new mongoose.Schema(
   {
     number: { type: String, default: "", trim: true },
+    /** US state / territory issuing the license (2-letter, e.g. UT). */
+    state: { type: String, default: "UT", trim: true, uppercase: true },
     expiry: { type: Date },
   },
   { _id: false }

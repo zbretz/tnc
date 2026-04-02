@@ -71,7 +71,7 @@ export async function seedDevDriversIfNeeded() {
         licensePlate: s.vehicle.licensePlate || "",
         photoUrl: s.vehicle.photoUrl || "",
       },
-      license: { number: `SEED-${email}`, expiry: new Date("2030-12-31") },
+      license: { number: `SEED-${email}`, state: "UT", expiry: new Date("2030-12-31") },
       avatarUrl: "",
     }).catch((e) => console.error("[tnc] seed DriverProfile", e));
   }
@@ -102,7 +102,7 @@ export async function seedDevDriversIfNeeded() {
         licensePlate: s.vehicle.licensePlate || "",
         photoUrl: s.vehicle.photoUrl || "",
       },
-      license: { number: `SEED-${email}`, expiry: new Date("2030-12-31") },
+      license: { number: `SEED-${email}`, state: "UT", expiry: new Date("2030-12-31") },
       avatarUrl: "",
     }).catch((e) => console.error("[tnc] seed DriverProfile backfill", e));
   }

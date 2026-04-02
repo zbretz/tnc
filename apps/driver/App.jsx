@@ -405,6 +405,7 @@ export default function App() {
   const [pendingDriverSignupToken, setPendingDriverSignupToken] = useState(null);
   const [regFirst, setRegFirst] = useState("");
   const [regLast, setRegLast] = useState("");
+  const [regLicState, setRegLicState] = useState("UT");
   const [regLicNum, setRegLicNum] = useState("");
   const [regLicExpiry, setRegLicExpiry] = useState("");
   const [regVehMake, setRegVehMake] = useState("");
@@ -990,6 +991,7 @@ export default function App() {
     setDriverPhone("");
     setRegErr(null);
     setPendingDriverSignupToken(null);
+    setRegLicState("UT");
     otpFlowSignupRef.current = false;
     otpVerifyInFlightRef.current = false;
   }, []);
@@ -1117,6 +1119,16 @@ export default function App() {
       setRegErr("Driver license number and expiry are required.");
       return;
     }
+    const rawSt = regLicState.trim().toUpperCase();
+    let licStateCode;
+    if (!rawSt) {
+      licStateCode = "UT";
+    } else if (rawSt.length === 2 && /^[A-Z]{2}$/.test(rawSt)) {
+      licStateCode = rawSt;
+    } else {
+      setRegErr("State must be a 2-letter code (e.g. UT).");
+      return;
+    }
     const mk = regVehMake.trim();
     const md = regVehModel.trim();
     const plate = regVehPlate.trim();
@@ -1142,7 +1154,7 @@ export default function App() {
           signupToken: pendingDriverSignupToken,
           firstName: fn,
           lastName: ln,
-          license: { number: licN, expiry: licExp },
+          license: { number: licN, expiry: licExp, state: licStateCode },
           vehicle: {
             make: mk,
             model: md,
@@ -1730,13 +1742,26 @@ export default function App() {
                   placeholderTextColor="#94a3b8"
                 />
                 <Text style={styles.regSectionTitle}>Driver license</Text>
+                <Text style={styles.regLabel}>State</Text>
+                <TextInput
+                  style={styles.regInput}
+                  value={regLicState}
+                  onChangeText={(t) =>
+                    setRegLicState(t.replace(/[^a-zA-Z]/g, "").toUpperCase().slice(0, 2))
+                  }
+                  autoCapitalize="characters"
+                  autoCorrect={false}
+                  maxLength={2}
+                  placeholder="UT"
+                  placeholderTextColor="#94a3b8"
+                />
                 <Text style={styles.regLabel}>License number</Text>
                 <TextInput
                   style={styles.regInput}
                   value={regLicNum}
                   onChangeText={setRegLicNum}
                   autoCapitalize="characters"
-                  placeholder="State license number"
+                  placeholder="License number"
                   placeholderTextColor="#94a3b8"
                 />
                 <Text style={styles.regLabel}>Expiry</Text>

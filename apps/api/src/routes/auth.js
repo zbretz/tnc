@@ -17,6 +17,7 @@ import { serializeUserMe } from "../serialize.js";
 import { normalizePhoneE164 } from "../lib/phone.js";
 import { DEV_SEED_DRIVER_EMAILS, DEV_SEED_DRIVER_EMAIL_SET } from "../seedDevDrivers.js";
 import { createAvatarPresignedPut, isAvatarS3Configured } from "../lib/s3AvatarPresign.js";
+import { sendOtpSms, isTwilioOtpConfigured } from "../lib/twilioOtp.js";
 
 const r = Router();
 
@@ -41,38 +42,6 @@ function hashOtpCode(phoneE164, code) {
 function randomFourDigitCode() {
   const n = crypto.randomInt(0, 10_000);
   return String(n).padStart(4, "0");
-}
-
-async function sendOtpSms(phoneE164, code) {
-  const sid = process.env.TWILIO_ACCOUNT_SID;
-  const token = process.env.TWILIO_AUTH_TOKEN;
-  const from = process.env.TWILIO_PHONE_NUMBER;
-  if (!sid || !token || !from) {
-    if (process.env.TNC_DEV_OTP_LOG === "1") {
-      console.log("[tnc:otp] SMS not configured; code for", phoneE164, "=", code);
-    }
-    return { ok: false, skipped: true };
-  }
-  const auth = Buffer.from(`${sid}:${token}`).toString("base64");
-  const body = new URLSearchParams({
-    To: phoneE164,
-    From: from,
-    Body: `Your TNC verification code: ${code}`,
-  });
-  const res = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${sid}/Messages.json`, {
-    method: "POST",
-    headers: {
-      Authorization: `Basic ${auth}`,
-      "Content-Type": "application/x-www-form-urlencoded",
-    },
-    body,
-  });
-  if (!res.ok) {
-    const t = await res.text();
-    console.error("[tnc:otp] Twilio error", res.status, t);
-    return { ok: false, error: "sms_send_failed" };
-  }
-  return { ok: true };
 }
 
 /** MVP: allow HTTPS or data URLs; cap size before moving uploads to object storage. */
@@ -120,7 +89,13 @@ function parseLicenseBody(raw) {
     if (!Number.isFinite(d.getTime())) return null;
     expiry = d;
   }
-  return { number, expiry };
+  let state = clip(raw.state, 2).toUpperCase();
+  if (!state) {
+    state = "UT";
+  } else if (!/^[A-Z]{2}$/.test(state)) {
+    return null;
+  }
+  return { number, expiry, state };
 }
 
 function userIsDriverDoc(user) {
@@ -149,6 +124,10 @@ r.post("/otp/start", async (req, res) => {
   const phoneE164 = normalizePhoneE164(req.body?.phone);
   if (!phoneE164) {
     res.status(400).json({ error: "Valid phone number required" });
+    return;
+  }
+  if (process.env.TNC_OTP_REQUIRE_TWILIO === "1" && !isTwilioOtpConfigured()) {
+    res.status(503).json({ error: "SMS delivery is not configured" });
     return;
   }
   const latest = await OtpChallenge.findOne({ phoneE164 }).sort({ createdAt: -1 }).exec();
@@ -373,6 +352,7 @@ r.post("/otp/complete-driver-profile", async (req, res) => {
     license: {
       number: lic.number,
       expiry: lic.expiry,
+      state: lic.state,
     },
     avatarUrl: av,
   }).catch((e) => console.error("[tnc] DriverProfile create (otp signup)", e));

@@ -28,6 +28,7 @@ import { initCheckoutAgenda } from "./lib/checkoutAgenda.js";
 import { routesRouter } from "./routes/routes.js";
 import { pricingRouter } from "./routes/pricing.js";
 import { paymentsRouter } from "./routes/payments.js";
+import { isTwilioOtpConfigured } from "./lib/twilioOtp.js";
 
 const PORT = Number(process.env.PORT) || 3000;
 
@@ -92,7 +93,11 @@ app.get("/config/rider", async (_req, res) => {
 });
 
 app.get("/health", (_req, res) => {
-  res.json({ ok: true, service: "tnc-api" });
+  res.json({
+    ok: true,
+    service: "tnc-api",
+    otpSms: isTwilioOtpConfigured() ? "twilio" : "off",
+  });
 });
 
 io.use((socket, next) => {
