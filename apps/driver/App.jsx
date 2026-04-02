@@ -3,6 +3,7 @@ import {
   ActivityIndicator,
   Alert,
   FlatList,
+  KeyboardAvoidingView,
   Modal,
   Platform,
   Pressable,
@@ -33,6 +34,13 @@ import { getApiUrl } from "./lib/config";
 import DriverInAppNavigationModal from "./DriverInAppNavigationModal";
 
 const TOKEN_KEY = "tnc_token_driver";
+
+/** `/auth/me` and login responses — reject rider-only JWTs in this app (see refreshSessionUser). */
+function responseUserIsDriver(user) {
+  if (!user || typeof user !== "object") return false;
+  if (user.role === "driver") return true;
+  return Array.isArray(user.roles) && user.roles.includes("driver");
+}
 
 /** Quoted fare = calculated fare × (pct / 100); 50–150%, 100 = baseline. */
 const FARE_ADJUSTMENT_PRESETS = [50, 75, 100, 125, 150];
@@ -288,6 +296,29 @@ export default function App() {
   const [completingTrip, setCompletingTrip] = useState(false);
   /** Pre-login: GET /health against configured API. */
   const [apiHealth, setApiHealth] = useState(null);
+  /** landing | signIn | register (phone OTP) | registerProfile (after code) | dev */
+  const [authPhase, setAuthPhase] = useState("landing");
+  const [devBypassAvailable, setDevBypassAvailable] = useState(false);
+  const [driverPhone, setDriverPhone] = useState("");
+  const [loginOtp, setLoginOtp] = useState("");
+  const [loginOtpSent, setLoginOtpSent] = useState(false);
+  const [otpModalVisible, setOtpModalVisible] = useState(false);
+  const [signInErr, setSignInErr] = useState(null);
+  const otpInputRef = useRef(null);
+  const otpVerifyInFlightRef = useRef(false);
+  /** true when the open OTP flow is Create account (allowSignup on verify). */
+  const otpFlowSignupRef = useRef(false);
+  const [pendingDriverSignupToken, setPendingDriverSignupToken] = useState(null);
+  const [regFirst, setRegFirst] = useState("");
+  const [regLast, setRegLast] = useState("");
+  const [regLicNum, setRegLicNum] = useState("");
+  const [regLicExpiry, setRegLicExpiry] = useState("");
+  const [regVehMake, setRegVehMake] = useState("");
+  const [regVehModel, setRegVehModel] = useState("");
+  const [regVehYear, setRegVehYear] = useState("");
+  const [regVehColor, setRegVehColor] = useState("");
+  const [regVehPlate, setRegVehPlate] = useState("");
+  const [regErr, setRegErr] = useState(null);
 
   const retryApiHealth = useCallback(() => {
     setApiHealth("loading");
@@ -451,6 +482,20 @@ export default function App() {
   const refreshSessionUser = useCallback(async (t) => {
     try {
       const { user } = await api("/auth/me", { token: t });
+      if (user && !responseUserIsDriver(user)) {
+        await AsyncStorage.removeItem(TOKEN_KEY);
+        setToken(null);
+        setSessionUser(null);
+        setAuthPhase("landing");
+        setOtpModalVisible(false);
+        setLoginOtpSent(false);
+        setLoginOtp("");
+        Alert.alert(
+          "Rider account",
+          "This session is for a rider account. Use the rider app for that login, or sign in with a driver account here."
+        );
+        return;
+      }
       setSessionUser(user || null);
     } catch {
       setSessionUser(null);
@@ -618,13 +663,15 @@ export default function App() {
       const { drivers } = await api("/auth/dev/drivers");
       setDevDrivers(Array.isArray(drivers) ? drivers : []);
       setDevListErr(null);
+      setDevBypassAvailable(true);
     } catch (e) {
       const msg = String(e?.message || e);
       setDevDrivers([]);
+      setDevBypassAvailable(false);
       const looks404 = /\b404\b/i.test(msg) || /not found/i.test(msg);
       setDevListErr(
         looks404
-          ? "Dev sign-in is disabled. Set TNC_DEV_AUTH=1 on the API and restart."
+          ? "Dev bypass is disabled. Set TNC_DEV_AUTH=1 on the API and restart."
           : msg
       );
     }
@@ -746,12 +793,203 @@ export default function App() {
         method: "POST",
         body: { driverId },
       });
+      if (!responseUserIsDriver(user)) {
+        Alert.alert("Dev sign-in", "That account is not a driver.");
+        return;
+      }
       await AsyncStorage.setItem(TOKEN_KEY, t);
       setToken(t);
       setSessionUser(user || null);
       await loadAvailable(t);
     } catch (e) {
       Alert.alert("Sign in failed", String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const goAuthLanding = useCallback(() => {
+    setAuthPhase("landing");
+    setSignInErr(null);
+    setLoginOtpSent(false);
+    setOtpModalVisible(false);
+    setLoginOtp("");
+    setDriverPhone("");
+    setRegErr(null);
+    setPendingDriverSignupToken(null);
+    otpFlowSignupRef.current = false;
+    otpVerifyInFlightRef.current = false;
+  }, []);
+
+  const sendDriverOtp = async (isSignup) => {
+    otpFlowSignupRef.current = Boolean(isSignup);
+    setSignInErr(null);
+    const phone = driverPhone.trim();
+    if (!phone) {
+      setSignInErr("Enter your mobile number.");
+      return;
+    }
+    setBusy(true);
+    try {
+      await api("/auth/otp/start", { method: "POST", body: { phone } });
+      setLoginOtpSent(true);
+      setLoginOtp("");
+      setOtpModalVisible(true);
+    } catch (e) {
+      setSignInErr(String(e?.message || e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const verifyDriverOtp = useCallback(
+    async (fourDigitCode) => {
+      const code = String(fourDigitCode ?? "").replace(/\D/g, "").slice(0, 4);
+      const phone = driverPhone.trim();
+      if (!phone || !/^\d{4}$/.test(code)) return;
+      if (otpVerifyInFlightRef.current) return;
+      otpVerifyInFlightRef.current = true;
+      setSignInErr(null);
+      setBusy(true);
+      const allowSignup = otpFlowSignupRef.current;
+      try {
+        const data = await api("/auth/otp/verify", {
+          method: "POST",
+          body: { phone, code, intent: "driver", ...(allowSignup ? { allowSignup: true } : {}) },
+        });
+        if (data.needsProfile === true && typeof data.signupToken === "string" && data.signupToken) {
+          if (!allowSignup) {
+            setSignInErr("Create an account first, or sign in with a registered number.");
+            setLoginOtp("");
+            return;
+          }
+          setPendingDriverSignupToken(data.signupToken);
+          setLoginOtp("");
+          setLoginOtpSent(false);
+          setOtpModalVisible(false);
+          setAuthPhase("registerProfile");
+          return;
+        }
+        const t = data.token;
+        if (!t) {
+          setSignInErr("Unexpected response from server.");
+          setLoginOtp("");
+          return;
+        }
+        if (!responseUserIsDriver(data.user)) {
+          setSignInErr("This account is not a driver. Use the rider app or register as a driver.");
+          setLoginOtp("");
+          return;
+        }
+        await AsyncStorage.setItem(TOKEN_KEY, t);
+        setToken(t);
+        setSessionUser(data.user || null);
+        setLoginOtp("");
+        setLoginOtpSent(false);
+        setOtpModalVisible(false);
+        await loadAvailable(t);
+      } catch (e) {
+        setSignInErr(String(e?.message || e));
+        setLoginOtp("");
+      } finally {
+        setBusy(false);
+        otpVerifyInFlightRef.current = false;
+      }
+    },
+    [driverPhone, loadAvailable]
+  );
+
+  const handleOtpModalDigitChange = useCallback(
+    (text) => {
+      const digits = text.replace(/\D/g, "").slice(0, 4);
+      setSignInErr(null);
+      setLoginOtp(digits);
+      if (digits.length === 4) {
+        void verifyDriverOtp(digits);
+      }
+    },
+    [verifyDriverOtp]
+  );
+
+  const closeOtpModal = useCallback(() => {
+    setOtpModalVisible(false);
+    setSignInErr(null);
+    setLoginOtp("");
+    otpVerifyInFlightRef.current = false;
+  }, []);
+
+  useEffect(() => {
+    if (!otpModalVisible) return undefined;
+    const t = requestAnimationFrame(() => {
+      otpInputRef.current?.focus?.();
+    });
+    return () => cancelAnimationFrame(t);
+  }, [otpModalVisible]);
+
+  const submitDriverProfileComplete = async () => {
+    setRegErr(null);
+    const fn = regFirst.trim();
+    const ln = regLast.trim();
+    if (!pendingDriverSignupToken) {
+      setRegErr("Session expired. Go back and request a new verification code.");
+      return;
+    }
+    if (!fn || !ln) {
+      setRegErr("First and last name are required.");
+      return;
+    }
+    const licN = regLicNum.trim();
+    const licExp = regLicExpiry.trim();
+    if (!licN || !licExp) {
+      setRegErr("Driver license number and expiry are required.");
+      return;
+    }
+    const mk = regVehMake.trim();
+    const md = regVehModel.trim();
+    const plate = regVehPlate.trim();
+    if (!mk || !md || !plate) {
+      setRegErr("Vehicle make, model, and license plate are required.");
+      return;
+    }
+    const yearStr = regVehYear.trim();
+    let yearOpt;
+    if (yearStr) {
+      const y = parseInt(yearStr, 10);
+      if (!Number.isInteger(y)) {
+        setRegErr("Vehicle year must be a number.");
+        return;
+      }
+      yearOpt = y;
+    }
+    setBusy(true);
+    try {
+      const { token: t, user } = await api("/auth/otp/complete-driver-profile", {
+        method: "POST",
+        body: {
+          signupToken: pendingDriverSignupToken,
+          firstName: fn,
+          lastName: ln,
+          license: { number: licN, expiry: licExp },
+          vehicle: {
+            make: mk,
+            model: md,
+            licensePlate: plate,
+            color: regVehColor.trim(),
+            ...(yearOpt !== undefined ? { year: yearOpt } : {}),
+          },
+        },
+      });
+      if (!responseUserIsDriver(user)) {
+        setRegErr("Server returned a non-driver account. Try again or contact support.");
+        return;
+      }
+      await AsyncStorage.setItem(TOKEN_KEY, t);
+      setToken(t);
+      setSessionUser(user || null);
+      setPendingDriverSignupToken(null);
+      await loadAvailable(t);
+    } catch (e) {
+      setRegErr(String(e?.message || e));
     } finally {
       setBusy(false);
     }
@@ -769,6 +1007,7 @@ export default function App() {
     setMe(null);
     setSessionUser(null);
     setInAppNavTarget(null);
+    goAuthLanding();
   };
 
   /** Admin: cancel an open request or any in-progress trip (API allows driver+isAdmin). */
@@ -1061,64 +1300,443 @@ export default function App() {
 
   if (!token) {
     return (
-      <View style={styles.authPicker}>
-        <StatusBar style="dark" />
-        <Text style={styles.title}>TNC Driver</Text>
-        <Text style={styles.apiHint} selectable>
-          API: {getApiUrl()}
-        </Text>
-        {apiHealth === "loading" ? (
-          <Text style={styles.apiHealthLine}>Checking server…</Text>
-        ) : apiHealth?.ok ? (
-          <Text style={styles.apiHealthOk}>Server reachable (GET /health)</Text>
-        ) : apiHealth ? (
-          <View style={styles.apiHealthBlock}>
-            <Text style={styles.apiHealthErr}>
-              Server check failed:{" "}
-              {typeof apiHealth.error === "string" ? apiHealth.error : "Unknown error"}
-            </Text>
-            <Pressable onPress={retryApiHealth} style={styles.apiHealthRetry} accessibilityRole="button">
-              <Text style={styles.apiHealthRetryText}>Retry</Text>
-            </Pressable>
-          </View>
-        ) : null}
-        <Text style={styles.pickerHint}>
-          Choose which driver you are (dev only). Seed accounts appear when the API runs with TNC_DEV_AUTH=1.
-        </Text>
-        {devListErr ? <Text style={styles.errText}>{devListErr}</Text> : null}
-        <FlatList
-          data={devDrivers}
-          keyExtractor={(x) => x.id}
-          style={{ flex: 1 }}
-          contentContainerStyle={styles.driverListContent}
-          refreshing={devRefreshing}
-          onRefresh={async () => {
-            setDevRefreshing(true);
-            await loadDevDrivers();
-            setDevRefreshing(false);
-          }}
-          renderItem={({ item }) => (
-            <Pressable
-              style={[styles.driverPickRow, busy && styles.btnDisabled]}
-              onPress={() => pickDriver(item.id)}
-              disabled={busy}
-            >
-              <Text style={styles.driverPickName}>{item.label}</Text>
-              {item.vehicleSummary ? <Text style={styles.driverPickVeh}>{item.vehicleSummary}</Text> : null}
-              <Text style={styles.driverPickEmail}>{item.email}</Text>
-            </Pressable>
-          )}
-          ListEmptyComponent={
-            devListErr ? null : (
-              <Text style={styles.empty}>
-                No drivers yet. Start the API with TNC_DEV_AUTH=1 to create demo drivers, then pull to refresh.
+      <KeyboardAvoidingView
+        style={styles.authKeyboardRoot}
+        behavior={Platform.OS === "ios" ? "padding" : undefined}
+      >
+        <View style={styles.authPicker}>
+          <StatusBar style="dark" />
+          <Text style={styles.title}>TNC Driver</Text>
+          <Text style={styles.apiHint} selectable>
+            API: {getApiUrl()}
+          </Text>
+          {apiHealth === "loading" ? (
+            <Text style={styles.apiHealthLine}>Checking server…</Text>
+          ) : apiHealth?.ok ? (
+            <Text style={styles.apiHealthOk}>Server reachable (GET /health)</Text>
+          ) : apiHealth ? (
+            <View style={styles.apiHealthBlock}>
+              <Text style={styles.apiHealthErr}>
+                Server check failed:{" "}
+                {typeof apiHealth.error === "string" ? apiHealth.error : "Unknown error"}
               </Text>
-            )
-          }
-        />
-        {busy ? <ActivityIndicator style={styles.pickerSpinner} /> : null}
-        {inAppNavModal}
-      </View>
+              <Pressable onPress={retryApiHealth} style={styles.apiHealthRetry} accessibilityRole="button">
+                <Text style={styles.apiHealthRetryText}>Retry</Text>
+              </Pressable>
+            </View>
+          ) : null}
+
+          {authPhase === "landing" ? (
+            <View style={styles.landingBlock}>
+              <Text style={styles.landingSubtitle}>
+                Sign in or create an account with your mobile number — we’ll text a code. No password.
+              </Text>
+              <Pressable
+                style={styles.landingPrimaryBtn}
+                onPress={() => {
+                  setAuthPhase("signIn");
+                  setSignInErr(null);
+                  setRegErr(null);
+                  setLoginOtpSent(false);
+                  setOtpModalVisible(false);
+                  setLoginOtp("");
+                  setPendingDriverSignupToken(null);
+                  otpFlowSignupRef.current = false;
+                }}
+                accessibilityRole="button"
+              >
+                <Text style={styles.landingPrimaryBtnText}>Sign in</Text>
+              </Pressable>
+              <Pressable
+                style={styles.landingSecondaryBtn}
+                onPress={() => {
+                  setAuthPhase("register");
+                  setSignInErr(null);
+                  setRegErr(null);
+                  setLoginOtpSent(false);
+                  setOtpModalVisible(false);
+                  setLoginOtp("");
+                  setPendingDriverSignupToken(null);
+                  otpFlowSignupRef.current = false;
+                }}
+                accessibilityRole="button"
+              >
+                <Text style={styles.landingSecondaryBtnText}>Create account</Text>
+              </Pressable>
+              {devBypassAvailable ? (
+                <Pressable
+                  style={styles.landingDevBtn}
+                  onPress={() => {
+                    setAuthPhase("dev");
+                    setDevListErr(null);
+                    void loadDevDrivers();
+                  }}
+                  accessibilityRole="button"
+                >
+                  <Text style={styles.landingDevBtnText}>Dev: switch seed driver</Text>
+                </Pressable>
+              ) : null}
+              <Text style={styles.landingFinePrint}>
+                Dev bypass skips OTP and logs you in as a seed demo driver when the API runs with TNC_DEV_AUTH=1. For
+                SMS codes locally, set TNC_DEV_OTP_LOG=1 on the API to print codes in the server console.
+              </Text>
+            </View>
+          ) : null}
+
+          {authPhase === "signIn" ? (
+            <View style={styles.signInWrap}>
+              <Pressable onPress={goAuthLanding} style={styles.authBackRow} accessibilityRole="button">
+                <Text style={styles.authBackText}>← Back</Text>
+              </Pressable>
+              <Text style={styles.signInTitle}>Sign in</Text>
+              {signInErr && !otpModalVisible ? <Text style={styles.errText}>{signInErr}</Text> : null}
+              <ScrollView
+                style={{ flex: 1 }}
+                contentContainerStyle={styles.regScrollContent}
+                keyboardShouldPersistTaps="handled"
+              >
+                <Text style={styles.regHint}>
+                  We’ll text a 4-digit code to the mobile number on your driver account (the one you used when you
+                  registered).
+                </Text>
+                <Text style={styles.regLabel}>Mobile number</Text>
+                <TextInput
+                  style={styles.regInput}
+                  value={driverPhone}
+                  onChangeText={setDriverPhone}
+                  keyboardType="phone-pad"
+                  placeholder="+1 or 10 digits"
+                  placeholderTextColor="#94a3b8"
+                  editable={!busy}
+                />
+                <Pressable
+                  style={[styles.regSubmitBtn, busy && styles.btnDisabled]}
+                  onPress={() => void sendDriverOtp(false)}
+                  disabled={busy}
+                  accessibilityRole="button"
+                >
+                  <Text style={styles.regSubmitBtnText}>{loginOtpSent ? "Resend code" : "Send code"}</Text>
+                </Pressable>
+                {loginOtpSent ? (
+                  <Pressable
+                    style={[styles.landingSecondaryBtn, { marginTop: 12 }]}
+                    onPress={() => {
+                      setOtpModalVisible(true);
+                      setSignInErr(null);
+                    }}
+                    accessibilityRole="button"
+                  >
+                    <Text style={styles.landingSecondaryBtnText}>Enter code</Text>
+                  </Pressable>
+                ) : null}
+                {loginOtpSent ? (
+                  <Pressable
+                    style={styles.authBackRow}
+                    onPress={() => {
+                      setLoginOtpSent(false);
+                      setOtpModalVisible(false);
+                      setLoginOtp("");
+                      setSignInErr(null);
+                    }}
+                    accessibilityRole="button"
+                  >
+                    <Text style={[styles.authBackText, styles.useDifferentNumberText]}>Use a different number</Text>
+                  </Pressable>
+                ) : null}
+              </ScrollView>
+            </View>
+          ) : null}
+
+          {authPhase === "register" ? (
+            <View style={styles.signInWrap}>
+              <Pressable onPress={goAuthLanding} style={styles.authBackRow} accessibilityRole="button">
+                <Text style={styles.authBackText}>← Back</Text>
+              </Pressable>
+              <Text style={styles.signInTitle}>Create account</Text>
+              {signInErr && !otpModalVisible ? <Text style={styles.errText}>{signInErr}</Text> : null}
+              <ScrollView
+                style={{ flex: 1 }}
+                contentContainerStyle={styles.regScrollContent}
+                keyboardShouldPersistTaps="handled"
+              >
+                <Text style={styles.regHint}>
+                  Enter your mobile number. We’ll text a code to verify it, then you’ll add your license and vehicle.
+                  Your application stays pending until an admin activates it.
+                </Text>
+                <Text style={styles.regLabel}>Mobile number</Text>
+                <TextInput
+                  style={styles.regInput}
+                  value={driverPhone}
+                  onChangeText={setDriverPhone}
+                  keyboardType="phone-pad"
+                  placeholder="+1 or 10 digits"
+                  placeholderTextColor="#94a3b8"
+                  editable={!busy}
+                />
+                <Pressable
+                  style={[styles.regSubmitBtn, busy && styles.btnDisabled]}
+                  onPress={() => void sendDriverOtp(true)}
+                  disabled={busy}
+                  accessibilityRole="button"
+                >
+                  <Text style={styles.regSubmitBtnText}>{loginOtpSent ? "Resend code" : "Send code"}</Text>
+                </Pressable>
+                {loginOtpSent ? (
+                  <Pressable
+                    style={[styles.landingSecondaryBtn, { marginTop: 12 }]}
+                    onPress={() => {
+                      setOtpModalVisible(true);
+                      setSignInErr(null);
+                    }}
+                    accessibilityRole="button"
+                  >
+                    <Text style={styles.landingSecondaryBtnText}>Enter code</Text>
+                  </Pressable>
+                ) : null}
+                {loginOtpSent ? (
+                  <Pressable
+                    style={styles.authBackRow}
+                    onPress={() => {
+                      setLoginOtpSent(false);
+                      setOtpModalVisible(false);
+                      setLoginOtp("");
+                      setSignInErr(null);
+                    }}
+                    accessibilityRole="button"
+                  >
+                    <Text style={[styles.authBackText, styles.useDifferentNumberText]}>Use a different number</Text>
+                  </Pressable>
+                ) : null}
+              </ScrollView>
+            </View>
+          ) : null}
+
+          {authPhase === "registerProfile" ? (
+            <View style={{ flex: 1 }}>
+              <Pressable
+                onPress={() => {
+                  setAuthPhase("register");
+                  setPendingDriverSignupToken(null);
+                  setRegErr(null);
+                }}
+                style={styles.authBackRow}
+                accessibilityRole="button"
+              >
+                <Text style={styles.authBackText}>← Back</Text>
+              </Pressable>
+              <Text style={styles.signInTitle}>Your details</Text>
+              <ScrollView
+                style={{ flex: 1 }}
+                contentContainerStyle={styles.regScrollContent}
+                keyboardShouldPersistTaps="handled"
+              >
+                <Text style={styles.regHint}>
+                  Phone verified. Complete your driver profile. You’ll sign in with SMS only from now on.
+                </Text>
+                {regErr ? <Text style={styles.errText}>{regErr}</Text> : null}
+                <Text style={styles.regSectionTitle}>Your name</Text>
+                <Text style={styles.regLabel}>First name</Text>
+                <TextInput
+                  style={styles.regInput}
+                  value={regFirst}
+                  onChangeText={setRegFirst}
+                  autoCapitalize="words"
+                  placeholder="Legal first name"
+                  placeholderTextColor="#94a3b8"
+                />
+                <Text style={styles.regLabel}>Last name</Text>
+                <TextInput
+                  style={styles.regInput}
+                  value={regLast}
+                  onChangeText={setRegLast}
+                  autoCapitalize="words"
+                  placeholder="Legal last name"
+                  placeholderTextColor="#94a3b8"
+                />
+                <Text style={styles.regSectionTitle}>Driver license</Text>
+                <Text style={styles.regLabel}>License number</Text>
+                <TextInput
+                  style={styles.regInput}
+                  value={regLicNum}
+                  onChangeText={setRegLicNum}
+                  autoCapitalize="characters"
+                  placeholder="State license number"
+                  placeholderTextColor="#94a3b8"
+                />
+                <Text style={styles.regLabel}>Expiry</Text>
+                <TextInput
+                  style={styles.regInput}
+                  value={regLicExpiry}
+                  onChangeText={setRegLicExpiry}
+                  placeholder="YYYY-MM-DD or ISO date"
+                  placeholderTextColor="#94a3b8"
+                />
+                <Text style={styles.regSectionTitle}>Vehicle</Text>
+                <Text style={styles.regLabel}>Make</Text>
+                <TextInput
+                  style={styles.regInput}
+                  value={regVehMake}
+                  onChangeText={setRegVehMake}
+                  autoCapitalize="words"
+                  placeholder="e.g. Toyota"
+                  placeholderTextColor="#94a3b8"
+                />
+                <Text style={styles.regLabel}>Model</Text>
+                <TextInput
+                  style={styles.regInput}
+                  value={regVehModel}
+                  onChangeText={setRegVehModel}
+                  autoCapitalize="words"
+                  placeholder="e.g. Camry"
+                  placeholderTextColor="#94a3b8"
+                />
+                <Text style={styles.regLabel}>Year (optional)</Text>
+                <TextInput
+                  style={styles.regInput}
+                  value={regVehYear}
+                  onChangeText={setRegVehYear}
+                  keyboardType="number-pad"
+                  placeholder="e.g. 2022"
+                  placeholderTextColor="#94a3b8"
+                />
+                <Text style={styles.regLabel}>Color</Text>
+                <TextInput
+                  style={styles.regInput}
+                  value={regVehColor}
+                  onChangeText={setRegVehColor}
+                  autoCapitalize="words"
+                  placeholder="e.g. Silver"
+                  placeholderTextColor="#94a3b8"
+                />
+                <Text style={styles.regLabel}>License plate</Text>
+                <TextInput
+                  style={styles.regInput}
+                  value={regVehPlate}
+                  onChangeText={setRegVehPlate}
+                  autoCapitalize="characters"
+                  placeholder="Plate number"
+                  placeholderTextColor="#94a3b8"
+                />
+                <Pressable
+                  style={[styles.regSubmitBtn, busy && styles.btnDisabled]}
+                  onPress={() => void submitDriverProfileComplete()}
+                  disabled={busy}
+                  accessibilityRole="button"
+                >
+                  <Text style={styles.regSubmitBtnText}>{busy ? "Submitting…" : "Submit application"}</Text>
+                </Pressable>
+                {busy ? <ActivityIndicator style={styles.pickerSpinner} /> : null}
+              </ScrollView>
+            </View>
+          ) : null}
+
+          {authPhase === "dev" ? (
+            <View style={{ flex: 1 }}>
+              <Pressable onPress={goAuthLanding} style={styles.authBackRow} accessibilityRole="button">
+                <Text style={styles.authBackText}>← Back</Text>
+              </Pressable>
+              <Text style={styles.signInTitle}>Dev: seed drivers</Text>
+              <Text style={styles.pickerHint}>
+                Bypasses OTP. Only seed demo accounts (not every driver). Requires TNC_DEV_AUTH=1.
+              </Text>
+              {devListErr ? <Text style={styles.errText}>{devListErr}</Text> : null}
+              <FlatList
+                data={devDrivers}
+                keyExtractor={(x) => x.id}
+                style={{ flex: 1 }}
+                contentContainerStyle={styles.driverListContent}
+                refreshing={devRefreshing}
+                onRefresh={async () => {
+                  setDevRefreshing(true);
+                  await loadDevDrivers();
+                  setDevRefreshing(false);
+                }}
+                renderItem={({ item }) => (
+                  <Pressable
+                    style={[styles.driverPickRow, busy && styles.btnDisabled]}
+                    onPress={() => pickDriver(item.id)}
+                    disabled={busy}
+                  >
+                    <Text style={styles.driverPickName}>{item.label}</Text>
+                    {item.vehicleSummary ? <Text style={styles.driverPickVeh}>{item.vehicleSummary}</Text> : null}
+                    <Text style={styles.driverPickEmail}>{item.email}</Text>
+                  </Pressable>
+                )}
+                ListEmptyComponent={
+                  devListErr ? null : (
+                    <Text style={styles.empty}>
+                      No seed drivers yet. Start the API with TNC_DEV_AUTH=1, then pull to refresh.
+                    </Text>
+                  )
+                }
+              />
+              {busy ? <ActivityIndicator style={styles.pickerSpinner} /> : null}
+            </View>
+          ) : null}
+
+          <Modal
+            visible={otpModalVisible && (authPhase === "signIn" || authPhase === "register")}
+            animationType="fade"
+            transparent
+            onRequestClose={closeOtpModal}
+          >
+            <View style={styles.otpModalOuter}>
+              <Pressable
+                style={styles.otpModalBackdrop}
+                onPress={closeOtpModal}
+                accessibilityRole="button"
+                accessibilityLabel="Close"
+              />
+              <KeyboardAvoidingView
+                style={styles.otpModalKb}
+                behavior={Platform.OS === "ios" ? "padding" : undefined}
+              >
+                <View style={styles.otpModalCard}>
+                  <Text style={styles.otpModalTitle}>Enter verification code</Text>
+                  <Text style={styles.otpModalSubtitle}>
+                    4-digit code sent to {driverPhone.trim() || "your phone"}
+                  </Text>
+                  <TextInput
+                    ref={otpInputRef}
+                    style={styles.otpModalInput}
+                    value={loginOtp}
+                    onChangeText={handleOtpModalDigitChange}
+                    keyboardType="number-pad"
+                    inputMode="numeric"
+                    maxLength={4}
+                    placeholder="••••"
+                    placeholderTextColor="#cbd5e1"
+                    editable={!busy}
+                    accessibilityLabel="Verification code, 4 digits"
+                  />
+                  {busy ? <ActivityIndicator style={styles.otpModalSpinner} color="#7c3aed" /> : null}
+                  {signInErr && otpModalVisible ? <Text style={styles.otpModalErr}>{signInErr}</Text> : null}
+                  <View style={styles.otpModalActions}>
+                    <Pressable
+                      style={[styles.otpModalSecondaryBtn, busy && styles.btnDisabled]}
+                      onPress={() => void sendDriverOtp(authPhase === "register")}
+                      disabled={busy}
+                      accessibilityRole="button"
+                    >
+                      <Text style={styles.otpModalSecondaryBtnText}>Resend code</Text>
+                    </Pressable>
+                    <Pressable
+                      onPress={closeOtpModal}
+                      disabled={busy}
+                      style={[styles.otpModalCancelBtn, busy && styles.btnDisabled]}
+                      accessibilityRole="button"
+                    >
+                      <Text style={styles.otpModalCancelText}>Cancel</Text>
+                    </Pressable>
+                  </View>
+                </View>
+              </KeyboardAvoidingView>
+            </View>
+          </Modal>
+
+          {inAppNavModal}
+        </View>
+      </KeyboardAvoidingView>
     );
   }
 
@@ -1737,7 +2355,122 @@ const pj = {
 };
 
 const styles = StyleSheet.create({
+  authKeyboardRoot: { flex: 1, backgroundColor: "#f8fafc" },
   authPicker: { flex: 1, backgroundColor: "#f8fafc", paddingTop: 56, paddingHorizontal: 16 },
+  landingBlock: { flex: 1, paddingTop: 8 },
+  landingSubtitle: { fontSize: 14, ...pj.r, color: "#475569", lineHeight: 21, marginBottom: 20 },
+  landingPrimaryBtn: {
+    backgroundColor: "#7c3aed",
+    borderRadius: 12,
+    paddingVertical: 16,
+    alignItems: "center",
+    marginBottom: 12,
+  },
+  landingPrimaryBtnText: { fontSize: 17, ...pj.b, color: "#fff" },
+  landingSecondaryBtn: {
+    backgroundColor: "#fff",
+    borderRadius: 12,
+    paddingVertical: 16,
+    alignItems: "center",
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: "#c4b5fd",
+  },
+  landingSecondaryBtnText: { fontSize: 17, ...pj.sb, color: "#5b21b6" },
+  landingDevBtn: {
+    paddingVertical: 14,
+    alignItems: "center",
+    marginBottom: 16,
+  },
+  landingDevBtnText: { fontSize: 15, ...pj.sb, color: "#2563eb", textDecorationLine: "underline" },
+  landingFinePrint: { fontSize: 12, ...pj.r, color: "#94a3b8", lineHeight: 17 },
+  signInWrap: { flex: 1, paddingTop: 4 },
+  signInTitle: { fontSize: 20, ...pj.b, color: "#0f172a", marginBottom: 12 },
+  authBackRow: { alignSelf: "flex-start", paddingVertical: 8, marginBottom: 4 },
+  authBackText: { fontSize: 16, ...pj.sb, color: "#2563eb" },
+  useDifferentNumberText: { fontSize: 14, ...pj.r, color: "#64748b" },
+  otpModalOuter: { flex: 1 },
+  otpModalBackdrop: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: "rgba(15, 23, 42, 0.5)",
+  },
+  otpModalKb: {
+    flex: 1,
+    justifyContent: "center",
+    paddingHorizontal: 24,
+  },
+  otpModalCard: {
+    backgroundColor: "#fff",
+    borderRadius: 16,
+    padding: 24,
+    borderWidth: 1,
+    borderColor: "#e2e8f0",
+  },
+  otpModalTitle: { fontSize: 20, ...pj.b, color: "#0f172a", marginBottom: 8, textAlign: "center" },
+  otpModalSubtitle: { fontSize: 14, ...pj.r, color: "#64748b", textAlign: "center", marginBottom: 20 },
+  otpModalInput: {
+    borderWidth: 2,
+    borderColor: "#c4b5fd",
+    borderRadius: 12,
+    paddingVertical: 16,
+    paddingHorizontal: 20,
+    fontSize: 28,
+    ...pj.b,
+    letterSpacing: 12,
+    textAlign: "center",
+    color: "#0f172a",
+    backgroundColor: "#faf5ff",
+  },
+  otpModalSpinner: { marginTop: 16 },
+  otpModalErr: { fontSize: 13, ...pj.r, color: "#b91c1c", textAlign: "center", marginTop: 12 },
+  otpModalActions: { marginTop: 20, gap: 10 },
+  otpModalSecondaryBtn: {
+    backgroundColor: "#f5f3ff",
+    borderRadius: 12,
+    paddingVertical: 14,
+    alignItems: "center",
+    borderWidth: 1,
+    borderColor: "#ddd6fe",
+  },
+  otpModalSecondaryBtnText: { fontSize: 16, ...pj.sb, color: "#5b21b6" },
+  otpModalCancelBtn: { paddingVertical: 12, alignItems: "center" },
+  otpModalCancelText: { fontSize: 16, ...pj.sb, color: "#64748b" },
+  authModeRow: { flexDirection: "row", gap: 10, marginBottom: 14 },
+  authModeBtn: {
+    flex: 1,
+    paddingVertical: 12,
+    borderRadius: 12,
+    backgroundColor: "#fff",
+    borderWidth: 1,
+    borderColor: "#e2e8f0",
+    alignItems: "center",
+  },
+  authModeBtnOn: { borderColor: "#7c3aed", backgroundColor: "#f5f3ff" },
+  authModeBtnText: { fontSize: 15, ...pj.sb, color: "#64748b" },
+  authModeBtnTextOn: { color: "#5b21b6" },
+  regScrollContent: { paddingBottom: 40 },
+  regHint: { fontSize: 13, color: "#475569", lineHeight: 19, marginBottom: 12 },
+  regSectionTitle: { fontSize: 15, ...pj.b, color: "#0f172a", marginTop: 8, marginBottom: 6 },
+  regLabel: { fontSize: 12, ...pj.sb, color: "#64748b", marginBottom: 4, marginTop: 8 },
+  regInput: {
+    borderWidth: 1,
+    borderColor: "#cbd5e1",
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: Platform.OS === "ios" ? 12 : 10,
+    fontSize: 16,
+    ...pj.r,
+    backgroundColor: "#fff",
+    color: "#0f172a",
+  },
+  regSubmitBtn: {
+    marginTop: 20,
+    backgroundColor: "#7c3aed",
+    borderRadius: 12,
+    paddingVertical: 14,
+    alignItems: "center",
+  },
+  regSubmitBtnText: { fontSize: 16, ...pj.b, color: "#fff" },
   pickerHint: { fontSize: 13, color: "#475569", marginBottom: 12, lineHeight: 18 },
   errText: { fontSize: 13, color: "#b91c1c", marginBottom: 12 },
   driverListContent: { paddingBottom: 32, flexGrow: 1 },

@@ -7,6 +7,7 @@ const vehicleSchema = new mongoose.Schema(
     year: { type: Number },
     color: { type: String, default: "", trim: true },
     licensePlate: { type: String, default: "", trim: true },
+    photoUrl: { type: String, default: "" },
   },
   { _id: false }
 );

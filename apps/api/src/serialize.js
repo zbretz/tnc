@@ -26,9 +26,12 @@ export function serializeDriverPublic(user) {
   const firstName = trimOrEmpty(user.firstName) || firstFromName || "Driver";
   const lastInitial = lastInitialFrom(user.lastName, user.name);
   const v = user.vehicle && typeof user.vehicle === "object" ? user.vehicle : {};
+  const vy = v.year;
+  const year = vy != null && Number.isFinite(Number(vy)) ? Math.round(Number(vy)) : undefined;
   const vehicle = {
     ...(trimOrEmpty(v.make) ? { make: trimOrEmpty(v.make) } : {}),
     ...(trimOrEmpty(v.model) ? { model: trimOrEmpty(v.model) } : {}),
+    ...(year !== undefined ? { year } : {}),
     ...(trimOrEmpty(v.color) ? { color: trimOrEmpty(v.color) } : {}),
     ...(trimOrEmpty(v.licensePlate) ? { licensePlate: trimOrEmpty(v.licensePlate) } : {}),
     ...(trimOrEmpty(v.photoUrl) ? { photoUrl: trimOrEmpty(v.photoUrl) } : {}),
@@ -42,7 +45,7 @@ export function serializeDriverPublic(user) {
 }
 
 /** Current user for GET /auth/me (no password hash). */
-export function serializeUserMe(user) {
+export function serializeUserMe(user, driverProfile) {
   if (!user) return null;
   const roles =
     Array.isArray(user.roles) && user.roles.length > 0
@@ -50,6 +53,9 @@ export function serializeUserMe(user) {
       : user.role
         ? [user.role]
         : ["rider"];
+  const vy = user.vehicle?.year;
+  const year =
+    vy != null && Number.isFinite(Number(vy)) ? Math.round(Number(vy)) : undefined;
   const base = {
     _id: String(user._id),
     email: user.email ?? "",
@@ -67,6 +73,7 @@ export function serializeUserMe(user) {
         ? {
             make: trimOrEmpty(user.vehicle.make),
             model: trimOrEmpty(user.vehicle.model),
+            ...(year !== undefined ? { year } : {}),
             color: trimOrEmpty(user.vehicle.color),
             licensePlate: trimOrEmpty(user.vehicle.licensePlate),
             photoUrl: trimOrEmpty(user.vehicle.photoUrl),
@@ -77,6 +84,26 @@ export function serializeUserMe(user) {
   };
   if (userIsDriver(user)) {
     base.driverPublic = serializeDriverPublic(user);
+    if (driverProfile && typeof driverProfile === "object") {
+      base.driverStatus = driverProfile.driverStatus || "pending";
+      const lic = driverProfile.license;
+      if (lic && typeof lic === "object") {
+        const exp = lic.expiry;
+        const expIso =
+          exp && typeof exp.toISOString === "function"
+            ? exp.toISOString()
+            : typeof exp === "string"
+              ? exp
+              : "";
+        const licNum = trimOrEmpty(lic.number);
+        if (licNum || expIso) {
+          base.license = {
+            ...(licNum ? { number: licNum } : {}),
+            ...(expIso ? { expiry: expIso } : {}),
+          };
+        }
+      }
+    }
   }
   return base;
 }

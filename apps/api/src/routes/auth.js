@@ -7,12 +7,15 @@ import { DriverProfile } from "../models/DriverProfile.js";
 import { OtpChallenge } from "../models/OtpChallenge.js";
 import {
   authMiddleware,
+  signDriverOtpSignupToken,
   signRiderSignupToken,
   signToken,
+  verifyDriverOtpSignupToken,
   verifyRiderSignupToken,
 } from "../middleware/auth.js";
 import { serializeUserMe } from "../serialize.js";
 import { normalizePhoneE164 } from "../lib/phone.js";
+import { DEV_SEED_DRIVER_EMAILS, DEV_SEED_DRIVER_EMAIL_SET } from "../seedDevDrivers.js";
 
 const r = Router();
 
@@ -79,7 +82,7 @@ function clip(s, max) {
 
 function parseMediaUrl(raw) {
   if (raw == null || raw === "") return "";
-  if (typeof raw !== "string") return null;
+  if (typeof raw !== "string") return "";
   const t = raw.trim();
   if (t.length > MAX_MEDIA_URL_CHARS) return null;
   return t;
@@ -93,22 +96,50 @@ function parseVehicleBody(raw) {
   const licensePlate = clip(raw.licensePlate, 20);
   const photoUrlRaw = parseMediaUrl(raw.photoUrl);
   if (photoUrlRaw === null) return null;
-  return { make, model, color, licensePlate, photoUrl: photoUrlRaw };
+  let year;
+  if (raw.year !== undefined && raw.year !== null && raw.year !== "") {
+    const y = typeof raw.year === "number" ? raw.year : parseInt(String(raw.year).trim(), 10);
+    const maxY = new Date().getFullYear() + 2;
+    if (Number.isInteger(y) && y >= 1980 && y <= maxY) {
+      year = y;
+    }
+  }
+  return { make, model, color, licensePlate, photoUrl: photoUrlRaw, ...(year !== undefined ? { year } : {}) };
 }
 
-function splitNameForDriver(name, firstNameIn, lastNameIn) {
-  const nameT = typeof name === "string" ? name.trim() : "";
-  const parts = nameT.split(/\s+/).filter(Boolean);
-  let first = typeof firstNameIn === "string" ? firstNameIn.trim() : "";
-  let last = typeof lastNameIn === "string" ? lastNameIn.trim() : "";
-  if (!first && parts.length) first = parts[0];
-  if (!last && parts.length > 1) last = parts[parts.length - 1];
-  return { first, last };
+/** Driver's license (ID), not vehicle plate. */
+function parseLicenseBody(raw) {
+  if (raw == null || typeof raw !== "object") return null;
+  const number = clip(raw.number, 48);
+  let expiry;
+  if (raw.expiry != null && raw.expiry !== "") {
+    const d = new Date(raw.expiry);
+    if (!Number.isFinite(d.getTime())) return null;
+    expiry = d;
+  }
+  return { number, expiry };
+}
+
+function userIsDriverDoc(user) {
+  if (!user) return false;
+  if (user.role === "driver") return true;
+  return Array.isArray(user.roles) && user.roles.includes("driver");
+}
+
+async function serializeUserMeForAuth(userDoc) {
+  if (!userDoc) return null;
+  let prof = null;
+  if (userIsDriverDoc(userDoc)) {
+    prof = await DriverProfile.findOne({ userId: userDoc._id }).lean().exec();
+  }
+  return serializeUserMe(userDoc, prof);
 }
 
 /**
  * POST /auth/otp/start { phone }
- * POST /auth/otp/verify { phone, code } → { token, user } or { needsProfile, signupToken }
+ * POST /auth/otp/verify { phone, code, intent?: "rider"|"driver" }
+ *   rider (default): { token, user } or { needsProfile, signupToken }
+ *   driver: { token, user } only; 404 if no driver for phone; 403 if phone is not a driver
  * POST /auth/otp/complete-profile { signupToken, firstName, lastName }
  */
 r.post("/otp/start", async (req, res) => {
@@ -172,10 +203,28 @@ r.post("/otp/verify", async (req, res) => {
   challenge.consumedAt = new Date();
   await challenge.save();
 
+  const intent = req.body?.intent === "driver" ? "driver" : "rider";
+  const allowDriverSignup = req.body?.allowSignup === true;
+
   let user = await User.findOne({ phoneE164 }).exec();
   if (!user) {
+    if (intent === "driver") {
+      if (allowDriverSignup) {
+        const signupToken = signDriverOtpSignupToken(phoneE164);
+        res.json({ needsProfile: true, signupToken });
+        return;
+      }
+      res.status(404).json({
+        error: "No driver account for this number. Use Create account if you’re new, or check the number you registered with.",
+      });
+      return;
+    }
     const signupToken = signRiderSignupToken(phoneE164);
     res.json({ needsProfile: true, signupToken });
+    return;
+  }
+  if (intent === "driver" && !userIsDriverDoc(user)) {
+    res.status(403).json({ error: "This phone is not registered as a driver account." });
     return;
   }
   user.phoneVerifiedAt = new Date();
@@ -183,7 +232,8 @@ r.post("/otp/verify", async (req, res) => {
   await user.save();
   const token = signToken(String(user._id), user);
   const fresh = await User.findById(user._id).select("-passwordHash").exec();
-  res.json({ token, user: serializeUserMe(fresh) });
+  const payloadUser = userIsDriverDoc(fresh) ? await serializeUserMeForAuth(fresh) : serializeUserMe(fresh);
+  res.json({ token, user: payloadUser });
 });
 
 /**
@@ -233,20 +283,115 @@ r.post("/otp/complete-profile", async (req, res) => {
   res.json({ token, user: serializeUserMe(fresh) });
 });
 
+/**
+ * POST /auth/otp/complete-driver-profile — finish driver signup after verify with intent=driver & allowSignup.
+ */
+r.post("/otp/complete-driver-profile", async (req, res) => {
+  const raw = req.body?.signupToken;
+  if (typeof raw !== "string" || !raw.trim()) {
+    res.status(400).json({ error: "signupToken required" });
+    return;
+  }
+  let phoneE164;
+  try {
+    ({ phoneE164 } = verifyDriverOtpSignupToken(raw.trim()));
+  } catch {
+    res.status(401).json({ error: "Invalid or expired signup token" });
+    return;
+  }
+  const firstNameIn =
+    typeof req.body?.firstName === "string" ? req.body.firstName.trim().slice(0, 80) : "";
+  const lastNameIn = typeof req.body?.lastName === "string" ? req.body.lastName.trim().slice(0, 80) : "";
+  if (!firstNameIn || !lastNameIn) {
+    res.status(400).json({ error: "firstName and lastName required" });
+    return;
+  }
+  const av = parseMediaUrl(req.body?.avatarUrl);
+  if (av === null) {
+    res.status(400).json({ error: "avatarUrl too large" });
+    return;
+  }
+  const veh = parseVehicleBody(req.body?.vehicle);
+  if (veh === null) {
+    res.status(400).json({ error: "vehicle photoUrl exceeds maximum length" });
+    return;
+  }
+  if (!veh.make || !veh.model || !veh.licensePlate) {
+    res.status(400).json({ error: "vehicle make, model, and licensePlate required" });
+    return;
+  }
+  const lic = parseLicenseBody(req.body?.license);
+  if (lic === null) {
+    res.status(400).json({ error: "invalid license payload" });
+    return;
+  }
+  if (!lic.number || !lic.expiry) {
+    res.status(400).json({ error: "license number and expiry required" });
+    return;
+  }
+
+  let user = await User.findOne({ phoneE164 }).exec();
+  if (user) {
+    if (!userIsDriverDoc(user)) {
+      res.status(409).json({ error: "This phone is already registered to a non-driver account." });
+      return;
+    }
+    const token = signToken(String(user._id), user);
+    const fresh = await User.findById(user._id).select("-passwordHash").exec();
+    res.json({ token, user: await serializeUserMeForAuth(fresh) });
+    return;
+  }
+
+  const displayName = [firstNameIn, lastNameIn].filter(Boolean).join(" ").trim();
+  user = await User.create({
+    phoneE164,
+    firstName: firstNameIn,
+    lastName: lastNameIn,
+    name: displayName,
+    role: "driver",
+    roles: ["driver"],
+    phoneVerifiedAt: new Date(),
+    phone: phoneE164,
+    avatarUrl: av,
+    vehicle: veh,
+  });
+  const v = veh;
+  await DriverProfile.create({
+    userId: user._id,
+    driverStatus: "pending",
+    vehicle: {
+      make: v.make || "",
+      model: v.model || "",
+      ...(v.year !== undefined ? { year: v.year } : {}),
+      color: v.color || "",
+      licensePlate: v.licensePlate || "",
+      photoUrl: v.photoUrl || "",
+    },
+    license: {
+      number: lic.number,
+      expiry: lic.expiry,
+    },
+    avatarUrl: av,
+  }).catch((e) => console.error("[tnc] DriverProfile create (otp signup)", e));
+  const token = signToken(String(user._id), user);
+  const fresh = await User.findById(user._id).select("-passwordHash").exec();
+  res.status(201).json({ token, user: await serializeUserMeForAuth(fresh) });
+});
+
 r.post("/register", async (req, res) => {
-  const {
-    email,
-    password,
-    name,
-    role,
-    firstName,
-    lastName,
-    avatarUrl: avatarIn,
-    vehicle: vehicleRaw,
-    phone: phoneIn,
-  } = req.body || {};
-  if (!email || !password || !name || !role || !["rider", "driver"].includes(role)) {
-    res.status(400).json({ error: "email, password, name, and role (rider|driver) required" });
+  const { email, password, name, role, phone: phoneIn } = req.body || {};
+  if (!role || !["rider", "driver"].includes(role)) {
+    res.status(400).json({ error: "role (rider|driver) required" });
+    return;
+  }
+  if (role === "driver") {
+    res.status(400).json({
+      error: "Driver signup uses phone verification only. Use the driver app: Create account → SMS code → profile.",
+    });
+    return;
+  }
+  if (!email || !password || !name) {
+    res.status(400).json({ error: "email, password, and name required" });
     return;
   }
   const existing = await User.findOne({ email: email.toLowerCase() });
@@ -265,37 +410,7 @@ r.post("/register", async (req, res) => {
   if (role === "rider" && phoneIn != null && String(phoneIn).trim()) {
     doc.phone = String(phoneIn).trim().slice(0, 32);
   }
-  if (role === "driver") {
-    const { first, last } = splitNameForDriver(name, firstName, lastName);
-    doc.firstName = first;
-    doc.lastName = last;
-    const av = parseMediaUrl(avatarIn);
-    if (av === null) {
-      res.status(400).json({ error: "avatarUrl too large" });
-      return;
-    }
-    doc.avatarUrl = av;
-    const veh = parseVehicleBody(vehicleRaw);
-    if (veh === null) {
-      res.status(400).json({ error: "vehicle.photoUrl too large" });
-      return;
-    }
-    doc.vehicle = veh;
-  }
   const user = await User.create(doc);
-  if (role === "driver") {
-    await DriverProfile.create({
-      userId: user._id,
-      driverStatus: "pending",
-      vehicle: {
-        make: doc.vehicle?.make || "",
-        model: doc.vehicle?.model || "",
-        color: doc.vehicle?.color || "",
-        licensePlate: doc.vehicle?.licensePlate || "",
-      },
-      avatarUrl: typeof doc.avatarUrl === "string" ? doc.avatarUrl : "",
-    }).catch((e) => console.error("[tnc] DriverProfile create", e));
-  }
   const token = signToken(String(user._id), user);
   res.status(201).json({
     token,
@@ -304,7 +419,7 @@ r.post("/register", async (req, res) => {
 });
 
 r.post("/login", async (req, res) => {
-  const { email, password } = req.body || {};
+  const { email, password, roleHint } = req.body || {};
   if (!email || !password) {
     res.status(400).json({ error: "email and password required" });
     return;
@@ -314,10 +429,14 @@ r.post("/login", async (req, res) => {
     res.status(401).json({ error: "Invalid credentials" });
     return;
   }
+  if (roleHint === "driver" && !userIsDriverDoc(user)) {
+    res.status(403).json({ error: "This email is not a driver account." });
+    return;
+  }
   const token = signToken(String(user._id), user);
   res.json({
     token,
-    user: serializeUserMe(user),
+    user: await serializeUserMeForAuth(user),
   });
 });
 
@@ -328,6 +447,7 @@ r.get("/dev/drivers", async (req, res) => {
   }
   const drivers = await User.find({
     $or: [{ role: "driver" }, { roles: { $in: ["driver"] } }],
+    email: { $in: DEV_SEED_DRIVER_EMAILS },
   })
     .select("email name firstName lastName vehicle isAdmin")
     .sort({ email: 1 })
@@ -369,8 +489,13 @@ r.post("/dev/login", async (req, res) => {
     res.status(404).json({ error: "Driver not found" });
     return;
   }
+  const emailKey = String(user.email || "").toLowerCase();
+  if (!DEV_SEED_DRIVER_EMAIL_SET.has(emailKey)) {
+    res.status(403).json({ error: "Dev sign-in is only for seed demo drivers" });
+    return;
+  }
   const token = signToken(String(user._id), user);
-  res.json({ token, user: serializeUserMe(user) });
+  res.json({ token, user: await serializeUserMeForAuth(user) });
 });
 
 r.get("/me", authMiddleware, async (req, res) => {
@@ -379,7 +504,7 @@ r.get("/me", authMiddleware, async (req, res) => {
     res.status(404).json({ error: "Not found" });
     return;
   }
-  res.json({ user: serializeUserMe(user) });
+  res.json({ user: await serializeUserMeForAuth(user) });
 });
 
 r.patch("/me", authMiddleware, async (req, res) => {
@@ -397,9 +522,15 @@ r.patch("/me", authMiddleware, async (req, res) => {
     }
     user.name = t;
   }
-  if (user.role === "driver" || (Array.isArray(user.roles) && user.roles.includes("driver"))) {
+  const isDriver = user.role === "driver" || (Array.isArray(user.roles) && user.roles.includes("driver"));
+  if (isDriver) {
     if (firstName != null) user.firstName = String(firstName).trim().slice(0, 80);
     if (lastName != null) user.lastName = String(lastName).trim().slice(0, 80);
+    if (firstName != null || lastName != null) {
+      const fn = String(user.firstName || "").trim();
+      const ln = String(user.lastName || "").trim();
+      if (fn && ln) user.name = [fn, ln].join(" ");
+    }
     if (avatarIn !== undefined) {
       const av = parseMediaUrl(avatarIn);
       if (av === null) {
@@ -411,7 +542,7 @@ r.patch("/me", authMiddleware, async (req, res) => {
     if (vehicleRaw !== undefined) {
       const veh = parseVehicleBody(vehicleRaw);
       if (veh === null) {
-        res.status(400).json({ error: "vehicle.photoUrl too large" });
+        res.status(400).json({ error: "vehicle photoUrl exceeds maximum length" });
         return;
       }
       const prev = user.vehicle?.toObject?.() ?? user.vehicle ?? {};
@@ -421,9 +552,39 @@ r.patch("/me", authMiddleware, async (req, res) => {
   if (user.role === "rider" && phoneIn !== undefined) {
     user.phone = String(phoneIn).trim().slice(0, 32);
   }
+  if (isDriver && phoneIn !== undefined) {
+    const p = normalizePhoneE164(phoneIn);
+    if (!p) {
+      res.status(400).json({ error: "Invalid phone number" });
+      return;
+    }
+    const taken = await User.findOne({ phoneE164: p, _id: { $ne: user._id } }).lean().exec();
+    if (taken) {
+      res.status(409).json({ error: "Phone number already in use" });
+      return;
+    }
+    user.phoneE164 = p;
+    user.phone = p;
+  }
   await user.save();
+  if (isDriver && (vehicleRaw !== undefined || avatarIn !== undefined)) {
+    const prof = await DriverProfile.findOne({ userId: user._id }).exec();
+    if (prof) {
+      const uv = user.vehicle?.toObject?.() ?? user.vehicle ?? {};
+      prof.vehicle = {
+        make: uv.make || "",
+        model: uv.model || "",
+        ...(uv.year != null && Number.isFinite(Number(uv.year)) ? { year: Math.round(Number(uv.year)) } : {}),
+        color: uv.color || "",
+        licensePlate: uv.licensePlate || "",
+        photoUrl: uv.photoUrl || "",
+      };
+      if (avatarIn !== undefined) prof.avatarUrl = user.avatarUrl || "";
+      await prof.save().catch((e) => console.error("[tnc] DriverProfile sync from PATCH /me", e));
+    }
+  }
   const fresh = await User.findById(user._id).select("-passwordHash").exec();
-  res.json({ user: serializeUserMe(fresh) });
+  res.json({ user: await serializeUserMeForAuth(fresh) });
 });
 
 export const authRouter = r;

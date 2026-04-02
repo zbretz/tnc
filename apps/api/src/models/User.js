@@ -4,6 +4,7 @@ const vehicleSchema = new mongoose.Schema(
   {
     make: { type: String, default: "", trim: true },
     model: { type: String, default: "", trim: true },
+    year: { type: Number },
     color: { type: String, default: "", trim: true },
     licensePlate: { type: String, default: "", trim: true },
     /** Vehicle photo (MVP: HTTPS or data URL; move to object storage later). */

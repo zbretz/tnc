@@ -11,6 +11,7 @@ const SEEDS = [
     role: "driver",
     isAdmin: true,
     phone: "+1-555-0100",
+    phoneE164: "+15550100100",
     vehicle: { make: "Toyota", model: "Camry", color: "Silver", licensePlate: "TNC-001", photoUrl: "" },
   },
   {
@@ -19,6 +20,7 @@ const SEEDS = [
     firstName: "Jordan",
     lastName: "Kim",
     role: "driver",
+    phoneE164: "+15550100200",
     vehicle: { make: "Honda", model: "Accord", color: "Blue", licensePlate: "TNC-002", photoUrl: "" },
   },
   {
@@ -27,9 +29,14 @@ const SEEDS = [
     firstName: "Sam",
     lastName: "Chen",
     role: "driver",
+    phoneE164: "+15550100300",
     vehicle: { make: "Tesla", model: "Model 3", color: "White", licensePlate: "TNC-003", photoUrl: "" },
   },
 ];
+
+/** Lowercase emails allowed for TNC_DEV_AUTH dev picker + dev login only (same as `SEEDS`). */
+export const DEV_SEED_DRIVER_EMAILS = SEEDS.map((s) => s.email.toLowerCase());
+export const DEV_SEED_DRIVER_EMAIL_SET = new Set(DEV_SEED_DRIVER_EMAILS);
 
 /**
  * Ensures demo drivers exist when TNC_DEV_AUTH=1 (shared password TNC_DEV_PASSWORD or "dev").
@@ -62,17 +69,25 @@ export async function seedDevDriversIfNeeded() {
         model: s.vehicle.model || "",
         color: s.vehicle.color || "",
         licensePlate: s.vehicle.licensePlate || "",
+        photoUrl: s.vehicle.photoUrl || "",
       },
+      license: { number: `SEED-${email}`, expiry: new Date("2030-12-31") },
       avatarUrl: "",
     }).catch((e) => console.error("[tnc] seed DriverProfile", e));
   }
   await User.updateOne(
     { email: "driver1@tnc.local" },
-    { $set: { isAdmin: true, phone: "+1-555-0100" } }
+    { $set: { isAdmin: true, phone: "+1-555-0100", phoneE164: "+15550100100", phoneVerifiedAt: new Date() } }
   ).exec();
 
   for (const s of SEEDS) {
     const email = s.email.toLowerCase();
+    if (s.phoneE164) {
+      await User.updateOne(
+        { email },
+        { $set: { phoneE164: s.phoneE164, phoneVerifiedAt: new Date(), phone: s.phoneE164 } }
+      ).exec();
+    }
     const u = await User.findOne({ email }).exec();
     if (!u) continue;
     const has = await DriverProfile.findOne({ userId: u._id }).exec();
@@ -85,7 +100,9 @@ export async function seedDevDriversIfNeeded() {
         model: s.vehicle.model || "",
         color: s.vehicle.color || "",
         licensePlate: s.vehicle.licensePlate || "",
+        photoUrl: s.vehicle.photoUrl || "",
       },
+      license: { number: `SEED-${email}`, expiry: new Date("2030-12-31") },
       avatarUrl: "",
     }).catch((e) => console.error("[tnc] seed DriverProfile backfill", e));
   }
