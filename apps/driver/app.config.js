@@ -77,6 +77,13 @@ module.exports = {
           "We share your location with the rider after you accept a trip.",
       },
     ],
+    [
+      "expo-image-picker",
+      {
+        photosPermission: "Choose a photo for your driver profile picture.",
+        cameraPermission: "Take a photo for your driver profile picture.",
+      },
+    ],
   ],
   extra: {
     apiUrl: process.env.EXPO_PUBLIC_API_URL || "http://10.0.0.135:3000",

@@ -3,6 +3,7 @@ import {
   ActivityIndicator,
   Alert,
   FlatList,
+  Image,
   KeyboardAvoidingView,
   Modal,
   Platform,
@@ -29,11 +30,15 @@ import * as Location from "expo-location";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { io } from "socket.io-client";
 import { StatusBar } from "expo-status-bar";
+import * as ImagePicker from "expo-image-picker";
 import FarePercentSlider from "./components/FarePercentSlider";
 import { getApiUrl } from "./lib/config";
 import DriverInAppNavigationModal from "./DriverInAppNavigationModal";
 
 const TOKEN_KEY = "tnc_token_driver";
+
+/** Stay under API `MAX_MEDIA_URL_CHARS` (450k) once serialized in JSON. */
+const MAX_AVATAR_DATA_URL_LENGTH = 430_000;
 
 /** `/auth/me` and login responses — reject rider-only JWTs in this app (see refreshSessionUser). */
 function responseUserIsDriver(user) {
@@ -102,6 +107,45 @@ const MAP_STYLE_OPTIONS = [
 function stripUndefined(obj) {
   if (obj == null || typeof obj !== "object" || Array.isArray(obj)) return obj;
   return Object.fromEntries(Object.entries(obj).filter(([, v]) => v !== undefined));
+}
+
+function imageAssetToDataUrl(asset) {
+  const mime =
+    typeof asset?.mimeType === "string" && asset.mimeType.startsWith("image/")
+      ? asset.mimeType
+      : "image/jpeg";
+  if (!asset?.base64) throw new Error("Could not read image data. Try another photo.");
+  const dataUrl = `data:${mime};base64,${asset.base64}`;
+  if (dataUrl.length > MAX_AVATAR_DATA_URL_LENGTH) {
+    throw new Error("Photo is too large. Try a smaller image.");
+  }
+  return dataUrl;
+}
+
+/**
+ * @param {"library" | "camera"} source
+ * @returns {Promise<string | null>} data URL or null if cancelled
+ */
+async function pickSquareImageAsDataUrl(source = "library") {
+  const opts = {
+    mediaTypes: ImagePicker.MediaTypeOptions.Images,
+    allowsEditing: true,
+    aspect: [1, 1],
+    quality: 0.35,
+    base64: true,
+  };
+  let result;
+  if (source === "camera") {
+    const cam = await ImagePicker.requestCameraPermissionsAsync();
+    if (!cam.granted) throw new Error("Camera access was denied.");
+    result = await ImagePicker.launchCameraAsync(opts);
+  } else {
+    const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (!perm.granted) throw new Error("Photo library access was denied.");
+    result = await ImagePicker.launchImageLibraryAsync(opts);
+  }
+  if (result.canceled || !result.assets?.[0]) return null;
+  return imageAssetToDataUrl(result.assets[0]);
 }
 
 async function api(path, opts = {}) {
@@ -319,6 +363,9 @@ export default function App() {
   const [regVehColor, setRegVehColor] = useState("");
   const [regVehPlate, setRegVehPlate] = useState("");
   const [regErr, setRegErr] = useState(null);
+  /** Optional data URL sent with complete-driver-profile. */
+  const [regAvatarUrl, setRegAvatarUrl] = useState(null);
+  const [avatarUploadBusy, setAvatarUploadBusy] = useState(false);
 
   const retryApiHealth = useCallback(() => {
     setApiHealth("loading");
@@ -501,6 +548,59 @@ export default function App() {
       setSessionUser(null);
     }
   }, []);
+
+  const openSignedInAvatarPicker = useCallback(() => {
+    if (!token || avatarUploadBusy) return;
+    const run = async (source) => {
+      setAvatarUploadBusy(true);
+      try {
+        const dataUrl = await pickSquareImageAsDataUrl(source);
+        if (!dataUrl) return;
+        const { user } = await api("/auth/me", {
+          method: "PATCH",
+          token,
+          body: { avatarUrl: dataUrl },
+        });
+        if (user && responseUserIsDriver(user)) setSessionUser(user);
+        else await refreshSessionUser(token);
+      } catch (e) {
+        Alert.alert("Profile photo", String(e?.message || e));
+      } finally {
+        setAvatarUploadBusy(false);
+      }
+    };
+    if (Platform.OS === "web") {
+      void run("library");
+      return;
+    }
+    Alert.alert("Profile photo", "Choose a source", [
+      { text: "Photo library", onPress: () => void run("library") },
+      { text: "Take photo", onPress: () => void run("camera") },
+      { text: "Cancel", style: "cancel" },
+    ]);
+  }, [token, avatarUploadBusy, refreshSessionUser]);
+
+  const openRegAvatarPicker = useCallback(() => {
+    if (busy) return;
+    const run = async (source) => {
+      setRegErr(null);
+      try {
+        const dataUrl = await pickSquareImageAsDataUrl(source);
+        if (dataUrl) setRegAvatarUrl(dataUrl);
+      } catch (e) {
+        setRegErr(String(e?.message || e));
+      }
+    };
+    if (Platform.OS === "web") {
+      void run("library");
+      return;
+    }
+    Alert.alert("Profile photo", "Choose a source", [
+      { text: "Photo library", onPress: () => void run("library") },
+      { text: "Take photo", onPress: () => void run("camera") },
+      { text: "Cancel", style: "cancel" },
+    ]);
+  }, [busy]);
 
   useEffect(() => {
     (async () => {
@@ -977,6 +1077,7 @@ export default function App() {
             color: regVehColor.trim(),
             ...(yearOpt !== undefined ? { year: yearOpt } : {}),
           },
+          ...(regAvatarUrl ? { avatarUrl: regAvatarUrl } : {}),
         },
       });
       if (!responseUserIsDriver(user)) {
@@ -987,6 +1088,7 @@ export default function App() {
       setToken(t);
       setSessionUser(user || null);
       setPendingDriverSignupToken(null);
+      setRegAvatarUrl(null);
       await loadAvailable(t);
     } catch (e) {
       setRegErr(String(e?.message || e));
@@ -1518,6 +1620,7 @@ export default function App() {
                   setAuthPhase("register");
                   setPendingDriverSignupToken(null);
                   setRegErr(null);
+                  setRegAvatarUrl(null);
                 }}
                 style={styles.authBackRow}
                 accessibilityRole="button"
@@ -1617,6 +1720,35 @@ export default function App() {
                   placeholder="Plate number"
                   placeholderTextColor="#94a3b8"
                 />
+                <Text style={styles.regSectionTitle}>Profile photo (optional)</Text>
+                <Text style={styles.regHint}>Shown to riders after you accept a trip.</Text>
+                <View style={styles.regAvatarRow}>
+                  {regAvatarUrl ? (
+                    <Image source={{ uri: regAvatarUrl }} style={styles.regAvatarThumb} />
+                  ) : (
+                    <View style={[styles.regAvatarThumb, styles.regAvatarThumbPlaceholder]} />
+                  )}
+                  <View style={styles.regAvatarActions}>
+                    <Pressable
+                      style={styles.regAvatarBtn}
+                      onPress={openRegAvatarPicker}
+                      disabled={busy}
+                      accessibilityRole="button"
+                    >
+                      <Text style={styles.regAvatarBtnText}>{regAvatarUrl ? "Change photo" : "Choose photo"}</Text>
+                    </Pressable>
+                    {regAvatarUrl ? (
+                      <Pressable
+                        style={styles.regAvatarBtn}
+                        onPress={() => setRegAvatarUrl(null)}
+                        disabled={busy}
+                        accessibilityRole="button"
+                      >
+                        <Text style={styles.regAvatarRemoveText}>Remove</Text>
+                      </Pressable>
+                    ) : null}
+                  </View>
+                </View>
                 <Pressable
                   style={[styles.regSubmitBtn, busy && styles.btnDisabled]}
                   onPress={() => void submitDriverProfileComplete()}
@@ -2095,6 +2227,28 @@ export default function App() {
       <StatusBar style="dark" />
       <Text style={styles.listTitle}>Open requests</Text>
       {signedInLine ? <Text style={styles.signedInLine}>{signedInLine}</Text> : null}
+      {token && sessionUser ? (
+        <View style={styles.profilePhotoRow}>
+          {sessionUser.avatarUrl ? (
+            <Image source={{ uri: sessionUser.avatarUrl }} style={styles.profilePhotoThumb} />
+          ) : (
+            <View style={[styles.profilePhotoThumb, styles.profilePhotoThumbPlaceholder]}>
+              <Text style={styles.profilePhotoPlaceholderText}>+</Text>
+            </View>
+          )}
+          <Pressable
+            style={styles.profilePhotoBtn}
+            onPress={openSignedInAvatarPicker}
+            disabled={avatarUploadBusy}
+            accessibilityRole="button"
+            accessibilityLabel="Update profile photo"
+          >
+            <Text style={styles.profilePhotoBtnText}>
+              {avatarUploadBusy ? "Uploading…" : sessionUser.avatarUrl ? "Change profile photo" : "Add profile photo"}
+            </Text>
+          </Pressable>
+        </View>
+      ) : null}
       {sessionUser?.isAdmin ? (
         <View style={styles.adminEntry}>
           <Pressable style={styles.adminEntryBtn} onPress={() => setRiderAdminOpen(true)}>
@@ -2471,6 +2625,13 @@ const styles = StyleSheet.create({
     alignItems: "center",
   },
   regSubmitBtnText: { fontSize: 16, ...pj.b, color: "#fff" },
+  regAvatarRow: { flexDirection: "row", alignItems: "center", marginTop: 6, marginBottom: 8, gap: 14 },
+  regAvatarThumb: { width: 56, height: 56, borderRadius: 28, backgroundColor: "#e2e8f0" },
+  regAvatarThumbPlaceholder: { borderWidth: 1, borderColor: "#cbd5e1", borderStyle: "dashed" },
+  regAvatarActions: { flex: 1, gap: 4 },
+  regAvatarBtn: { alignSelf: "flex-start", paddingVertical: 4 },
+  regAvatarBtnText: { fontSize: 15, ...pj.sb, color: "#2563eb" },
+  regAvatarRemoveText: { fontSize: 14, ...pj.sb, color: "#b91c1c" },
   pickerHint: { fontSize: 13, color: "#475569", marginBottom: 12, lineHeight: 18 },
   errText: { fontSize: 13, color: "#b91c1c", marginBottom: 12 },
   driverListContent: { paddingBottom: 32, flexGrow: 1 },
@@ -2504,6 +2665,23 @@ const styles = StyleSheet.create({
   },
   listWrap: { flex: 1, paddingTop: 56, paddingHorizontal: 16, backgroundColor: "#f8fafc" },
   signedInLine: { fontSize: 13, ...pj.r, color: "#475569", marginBottom: 10 },
+  profilePhotoRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginBottom: 14,
+    gap: 12,
+    backgroundColor: "#fff",
+    borderRadius: 12,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderWidth: 1,
+    borderColor: "#e2e8f0",
+  },
+  profilePhotoThumb: { width: 52, height: 52, borderRadius: 26, backgroundColor: "#e2e8f0" },
+  profilePhotoThumbPlaceholder: { justifyContent: "center", alignItems: "center", borderWidth: 1, borderColor: "#cbd5e1" },
+  profilePhotoPlaceholderText: { fontSize: 22, ...pj.sb, color: "#94a3b8", marginTop: -2 },
+  profilePhotoBtn: { flex: 1, paddingVertical: 4 },
+  profilePhotoBtnText: { fontSize: 15, ...pj.sb, color: "#2563eb" },
   adminEntry: { marginBottom: 12 },
   adminEntryBtn: {
     flexDirection: "row",
