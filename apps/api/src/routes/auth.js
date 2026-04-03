@@ -212,6 +212,16 @@ r.post("/otp/verify", async (req, res) => {
   }
   user.phoneVerifiedAt = new Date();
   if (!user.phone) user.phone = phoneE164;
+  /**
+   * Rider app booking and payments require JWT role "rider". Driver-only accounts (seed / driver signup)
+   * still receive OTP on the rider app; grant rider so they can book without a separate account.
+   */
+  if (intent === "rider") {
+    const roles = rolesFromUserDoc(user);
+    if (!roles.includes("rider")) {
+      user.roles = [...roles, "rider"];
+    }
+  }
   await user.save();
   const token = signToken(String(user._id), user);
   const fresh = await User.findById(user._id).select("-passwordHash").exec();

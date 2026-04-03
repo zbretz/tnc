@@ -1811,7 +1811,8 @@ export default function App() {
               ) : null}
               <Text style={styles.landingFinePrint}>
                 Dev bypass skips OTP and logs you in as a seed demo driver when the API runs with TNC_DEV_AUTH=1. For
-                SMS codes locally, set TNC_DEV_OTP_LOG=1 on the API to print codes in the server console.
+                local OTP without SMS, set TNC_DEV_OTP_LOG=1 on the API (codes print in the server console; SMS is not
+                sent).
               </Text>
             </View>
           ) : null}

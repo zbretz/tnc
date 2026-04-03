@@ -13,14 +13,24 @@ export function isTwilioOtpConfigured() {
 }
 
 /**
+ * When `TNC_DEV_OTP_LOG=1`, OTP is printed to the API console and SMS is not sent (even if Twilio is configured).
+ * When unset, Twilio sends SMS if configured; otherwise the challenge is stored but no SMS is sent (same as before).
+ */
+function isDevConsoleOtpMode() {
+  return process.env.TNC_DEV_OTP_LOG === "1";
+}
+
+/**
  * Send a one-time passcode via Twilio Programmable SMS.
  * @returns {Promise<{ ok: true } | { ok: false, skipped?: true, error?: string }>}
  */
 export async function sendOtpSms(phoneE164, code) {
+  if (isDevConsoleOtpMode()) {
+    console.info(`[tnc:otp] ${phoneE164} → ${code} (TNC_DEV_OTP_LOG=1: console only, SMS not sent)`);
+    return { ok: false, skipped: true };
+  }
+
   if (!isTwilioOtpConfigured()) {
-    if (process.env.TNC_DEV_OTP_LOG === "1") {
-      console.log("[tnc:otp] SMS not configured; code for", phoneE164, "=", code);
-    }
     return { ok: false, skipped: true };
   }
 
