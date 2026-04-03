@@ -66,6 +66,22 @@ function fareAdjustmentTrackColor(pct) {
   return "#7c3aed";
 }
 
+/** Rider-quoted fare on trip, shown to driver after their app take (API driverShareTotal or local fallback). */
+function driverTripFareEstimateUsd(trip, sessionUser) {
+  const fe = trip?.fareEstimate;
+  if (!fe || typeof fe.total !== "number" || !Number.isFinite(fe.total)) return null;
+  if (fe.driverShareTotal != null && Number.isFinite(Number(fe.driverShareTotal))) {
+    return Number(fe.driverShareTotal);
+  }
+  const pct =
+    typeof sessionUser?.appTakePercent === "number" && Number.isFinite(sessionUser.appTakePercent)
+      ? sessionUser.appTakePercent
+      : 20;
+  const fareCents = Math.max(0, Math.round(fe.total * 100));
+  const take = Math.round((fareCents * Math.min(100, Math.max(0, pct))) / 100);
+  return (fareCents - take) / 100;
+}
+
 const MAP_EDGE_PADDING = { top: 96, right: 40, bottom: 200, left: 40 };
 const MAP_STYLE_CLEAN = [
   { elementType: "geometry", stylers: [{ color: "#f5f7fb" }] },
@@ -500,6 +516,13 @@ export default function App() {
         );
         return;
       }
+      if (t?.status === "accepted" && t?._id && token) {
+        try {
+          await api(`/trips/${t._id}/driver-en-route`, { method: "POST", token });
+        } catch {
+          /* non-fatal; location updates also mark en route */
+        }
+      }
       const pickupArrivalPending = t?.status === "accepted" && !t?.driverArrivedAtPickupAt;
       setInAppNavTarget({
         lat: la,
@@ -512,7 +535,7 @@ export default function App() {
         showArrivalChrome: t?.status !== "accepted" || !t?.driverArrivedAtPickupAt,
       });
     },
-    [pickupLabel]
+    [pickupLabel, token]
   );
 
   const openInAppNavigateDropoffFor = useCallback(
@@ -2490,9 +2513,10 @@ export default function App() {
             {dropoffLabel(previewTrip) ? `\nDropoff: ${dropoffLabel(previewTrip)}` : "\nNo dropoff set on this request."}
             {`\n${tripRequestMadeLabel(previewTrip) || "Requested —"}`}
             {tripPickupByLabel(previewTrip) ? `\n${tripPickupByLabel(previewTrip)}` : "\nPickup: Now"}
-            {previewTrip.fareEstimate?.total != null
-              ? `\nEst. fare: $${Number(previewTrip.fareEstimate.total).toFixed(2)}`
-              : ""}
+            {(() => {
+              const est = driverTripFareEstimateUsd(previewTrip, sessionUser);
+              return est != null ? `\nEst. your fare: $${est.toFixed(2)}` : "";
+            })()}
             {previewTrip.riderPhone ? `\nRider phone: ${previewTrip.riderPhone}` : ""}
           </Text>
           <View style={styles.row}>
@@ -2850,7 +2874,9 @@ export default function App() {
         ListEmptyComponent={
           <Text style={styles.empty}>No open requests. Keep this screen open — new rides appear via socket.</Text>
         }
-        renderItem={({ item }) => (
+        renderItem={({ item }) => {
+          const driverEst = driverTripFareEstimateUsd(item, sessionUser);
+          return (
           <View style={styles.card}>
             <Text style={styles.cardTitle}>
               Trip {String(item?._id != null ? item._id : "").slice(-6) || "—"}
@@ -2865,10 +2891,8 @@ export default function App() {
             {tripPickupByLabel(item) ? (
               <Text style={[styles.cardMeta, styles.cardPickupBy]}>{tripPickupByLabel(item)}</Text>
             ) : null}
-            {item.fareEstimate?.total != null ? (
-              <Text style={styles.cardMeta}>
-                Est. fare: ${Number(item.fareEstimate.total).toFixed(2)}
-              </Text>
+            {driverEst != null ? (
+              <Text style={styles.cardMeta}>Est. your fare: ${driverEst.toFixed(2)}</Text>
             ) : null}
             {item.riderPhone ? (
               <Text style={styles.cardPhone}>Rider phone: {item.riderPhone}</Text>
@@ -2893,7 +2917,8 @@ export default function App() {
               </Pressable>
             ) : null}
           </View>
-        )}
+          );
+        }}
       />
       {inAppNavModal}
       {completingTrip ? (
