@@ -1,4 +1,5 @@
 import { DriverProfile } from "./models/DriverProfile.js";
+import { driverShareUsdAfterAppTake } from "./lib/driverPayout.js";
 
 function trimOrEmpty(s) {
   return typeof s === "string" ? s.trim() : "";
@@ -219,9 +220,13 @@ export function serializeTrip(t, options = {}) {
     ...(t.dropoffAddress ? { dropoffAddress: t.dropoffAddress } : {}),
     ...(t.preferredPickupAt ? { preferredPickupAt: t.preferredPickupAt.toISOString() } : {}),
     status: t.status,
+    ...(t.driverEnRouteToPickupAt
+      ? { driverEnRouteToPickupAt: t.driverEnRouteToPickupAt.toISOString() }
+      : {}),
     ...(t.driverArrivedAtPickupAt
       ? { driverArrivedAtPickupAt: t.driverArrivedAtPickupAt.toISOString() }
       : {}),
+    ...(t.rideInProgressAt ? { rideInProgressAt: t.rideInProgressAt.toISOString() } : {}),
     ...(t.awaitingRiderCheckoutDeadlineAt
       ? { awaitingRiderCheckoutDeadlineAt: t.awaitingRiderCheckoutDeadlineAt.toISOString() }
       : {}),
@@ -260,14 +265,26 @@ export function serializeTrip(t, options = {}) {
         }
       : {}),
     ...(t.fareEstimate?.computedAt && typeof t.fareEstimate.total === "number"
-      ? {
-          fareEstimate: {
+      ? (() => {
+          const total = t.fareEstimate.total;
+          const fe = {
             currency: t.fareEstimate.currency || "USD",
-            total: t.fareEstimate.total,
+            total,
             breakdown: t.fareEstimate.breakdown,
             computedAt: t.fareEstimate.computedAt.toISOString(),
-          },
-        }
+          };
+          const pctRaw =
+            options.driverFareDisplayAppTakePercent !== undefined
+              ? options.driverFareDisplayAppTakePercent
+              : options.assignedDriverAppTakePercent;
+          if (typeof pctRaw === "number" && Number.isFinite(pctRaw)) {
+            const share = driverShareUsdAfterAppTake(total, pctRaw);
+            if (share != null && Number.isFinite(share)) {
+              fe.driverShareTotal = Math.round(share * 100) / 100;
+            }
+          }
+          return { fareEstimate: fe };
+        })()
       : {}),
     ...(t.deadheadRoute?.computedAt
       ? {
@@ -324,6 +341,33 @@ export function serializeTrip(t, options = {}) {
           },
         }
       : {}),
+    ...(t.riderCancelChargeStatus && t.riderCancelChargeStatus !== "none"
+      ? {
+          riderCancelCharge: {
+            status: t.riderCancelChargeStatus,
+            ...(t.riderCancelFeeCents != null ? { amountCents: t.riderCancelFeeCents } : {}),
+            ...(t.riderCancelChargeCurrency ? { currency: t.riderCancelChargeCurrency } : {}),
+            ...(t.riderCancelChargeError ? { error: t.riderCancelChargeError } : {}),
+            ...(t.riderCancelChargeStatus === "requires_action" ? { requiresAction: true } : {}),
+          },
+        }
+      : {}),
+    ...(t.riderCancelPayoutStatus && t.riderCancelPayoutStatus !== "none"
+      ? {
+          riderCancelPayout: {
+            status: t.riderCancelPayoutStatus,
+            ...(t.riderCancelPayoutStripeFeeCents != null
+              ? { stripeFeeCents: t.riderCancelPayoutStripeFeeCents }
+              : {}),
+            ...(t.riderCancelPayoutNetCents != null ? { netCents: t.riderCancelPayoutNetCents } : {}),
+            ...(t.riderCancelPayoutTransferId ? { transferId: t.riderCancelPayoutTransferId } : {}),
+            ...(t.riderCancelPayoutError ? { error: t.riderCancelPayoutError } : {}),
+            ...(t.riderCancelPayoutComputedAt
+              ? { computedAt: t.riderCancelPayoutComputedAt.toISOString() }
+              : {}),
+          },
+        }
+      : {}),
     createdAt: t.createdAt.toISOString(),
     updatedAt: t.updatedAt.toISOString(),
   };
@@ -339,5 +383,9 @@ export async function serializeTripPopulated(trip, options = {}) {
   if (dp === undefined && isPopulatedDriver(trip.driver)) {
     dp = await DriverProfile.findOne({ userId: trip.driver._id }).lean().exec();
   }
-  return serializeTrip(trip, { ...options, driverProfile: dp });
+  let assignedDriverAppTakePercent = options.assignedDriverAppTakePercent;
+  if (assignedDriverAppTakePercent === undefined && dp && typeof dp.appTakePercent === "number") {
+    assignedDriverAppTakePercent = dp.appTakePercent;
+  }
+  return serializeTrip(trip, { ...options, driverProfile: dp, assignedDriverAppTakePercent });
 }

@@ -74,8 +74,15 @@ const tripSchema = new mongoose.Schema(
       lng: Number,
       updatedAt: Date,
     },
+    /**
+     * When the assigned driver is considered en route to pickup (not tied to accept time).
+     * Set by POST /trips/:id/driver-en-route or first PATCH driver-location while accepted.
+     */
+    driverEnRouteToPickupAt: { type: Date, default: null },
     /** Set when the assigned driver signals they are at the pickup pin (accepted leg only). Cleared when the ride starts. */
     driverArrivedAtPickupAt: { type: Date, default: null },
+    /** When status became in_progress (ride started). Used for rider cancel fee policy. */
+    rideInProgressAt: { type: Date, default: null },
     /** Server-computed driving ETA driver → pickup while accepted */
     etaToPickup: { type: drivingEtaLegSchema, default: null },
     /** Server-computed driving ETA driver → dropoff while in_progress */
@@ -115,6 +122,50 @@ const tripSchema = new mongoose.Schema(
     fareChargeCurrency: { type: String, default: "" },
     stripePaymentIntentId: { type: String, default: "" },
     fareChargeError: { type: String, default: "" },
+
+    /** Rider cancel fee charge (off-session PI). Cancel always completes even if charge fails. */
+    riderCancelChargeStatus: {
+      type: String,
+      enum: [
+        "none",
+        "waived",
+        "succeeded",
+        "failed",
+        "requires_action",
+        "skipped_stripe_disabled",
+        "skipped_no_payment_method",
+        "skipped_below_minimum",
+      ],
+      default: "none",
+    },
+    /** Policy fee (cents) and split snapshot at cancel time. */
+    riderCancelFeeCents: { type: Number, default: null },
+    riderCancelAppTakeCents: { type: Number, default: null },
+    riderCancelDriverShareCents: { type: Number, default: null },
+    riderCancelChargeCurrency: { type: String, default: "" },
+    stripeCancelPaymentIntentId: { type: String, default: "" },
+    riderCancelChargeError: { type: String, default: "" },
+    riderCancelChargeComputedAt: { type: Date, default: null },
+
+    /** Driver share of successful cancel fee (Connect transfer after rider charge succeeds). */
+    riderCancelPayoutStatus: {
+      type: String,
+      enum: [
+        "none",
+        "waived",
+        "skipped_no_driver",
+        "skipped_no_charge",
+        "pending_connect",
+        "paid",
+        "failed",
+      ],
+      default: "none",
+    },
+    riderCancelPayoutStripeFeeCents: { type: Number, default: null },
+    riderCancelPayoutNetCents: { type: Number, default: null },
+    riderCancelPayoutTransferId: { type: String, default: "" },
+    riderCancelPayoutError: { type: String, default: "" },
+    riderCancelPayoutComputedAt: { type: Date, default: null },
 
     /** Driver payout ledger (after successful rider charge). Tip 100% to driver; app take on fare only; full Stripe fee from driver side. */
     driverPayoutStatus: {

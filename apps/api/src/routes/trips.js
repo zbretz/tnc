@@ -21,7 +21,15 @@ import {
 import { getStripe, stripeEnabled } from "../lib/stripe.js";
 import { effectiveRequirePaymentMethodToBook } from "../lib/paymentPolicy.js";
 import { reconcileTripFareChargeFromStripe } from "../lib/reconcileTripFareCharge.js";
+import { reconcileRiderCancelChargeFromStripe } from "../lib/reconcileRiderCancelCharge.js";
 import { riderRetryTripFareCharge } from "../lib/retryTripFareCharge.js";
+import { riderRetryCancelCharge } from "../lib/retryRiderCancelCharge.js";
+import { applyRiderCancelCharge } from "../lib/chargeRiderCancellation.js";
+import { processRiderCancelFeePayout } from "../lib/driverPayout.js";
+import {
+  computeRiderCancellationFeeCents,
+  computeCancelFeeSplitCents,
+} from "../lib/riderCancellationFee.js";
 import {
   notifyRiderDriverAccepted,
   notifyRiderDriverArrived,
@@ -71,6 +79,28 @@ function tripDriverIdString(trip) {
   return String(trip.driver._id ?? trip.driver);
 }
 
+/** Quote + platform/driver split on cancel fee (same app-take % as trip fare). */
+async function riderCancellationQuotePayload(trip) {
+  const q = computeRiderCancellationFeeCents(trip, new Date());
+  let appTakePercent = 20;
+  if (trip.driver && q.feeCents > 0) {
+    const driverOid = trip.driver._id ?? trip.driver;
+    const dp = await DriverProfile.findOne({ userId: driverOid }).select("appTakePercent").lean().exec();
+    if (typeof dp?.appTakePercent === "number" && Number.isFinite(dp.appTakePercent)) {
+      appTakePercent = dp.appTakePercent;
+    }
+  }
+  const split = computeCancelFeeSplitCents(q.feeCents, appTakePercent);
+  return {
+    feeCents: q.feeCents,
+    tier: q.tier,
+    explanation: q.explanation,
+    appTakePercent,
+    appTakeCents: split.appTakeCents,
+    driverShareCents: split.driverShareCents,
+  };
+}
+
 export function createTripsRouter(deps) {
   const r = Router();
 
@@ -112,14 +142,55 @@ export function createTripsRouter(deps) {
       res.status(400).json({ error: "Cannot cancel" });
       return;
     }
+    let cancelQuotePayload = null;
+    if (isRider) {
+      cancelQuotePayload = await riderCancellationQuotePayload(trip);
+      const riderDoc = await User.findById(trip.rider).exec();
+      if (riderDoc) {
+        try {
+          await applyRiderCancelCharge(trip, riderDoc, cancelQuotePayload);
+        } catch (e) {
+          console.error("[tnc] applyRiderCancelCharge", e);
+          trip.riderCancelChargeStatus = "failed";
+          trip.riderCancelChargeError = e?.raw?.message || e?.message || "charge_error";
+        }
+      } else {
+        const fc = cancelQuotePayload?.feeCents ?? 0;
+        const cur = (
+          typeof trip.fareEstimate?.currency === "string" ? trip.fareEstimate.currency : "USD"
+        ).toLowerCase();
+        trip.riderCancelChargeComputedAt = new Date();
+        trip.riderCancelChargeCurrency = cur;
+        if (fc > 0) {
+          trip.riderCancelFeeCents = fc;
+          trip.riderCancelAppTakeCents = cancelQuotePayload.appTakeCents ?? 0;
+          trip.riderCancelDriverShareCents = cancelQuotePayload.driverShareCents ?? 0;
+          trip.riderCancelChargeStatus = "failed";
+          trip.riderCancelChargeError = "Rider account missing.";
+        } else {
+          trip.riderCancelFeeCents = 0;
+          trip.riderCancelAppTakeCents = 0;
+          trip.riderCancelDriverShareCents = 0;
+          trip.riderCancelChargeStatus = "waived";
+        }
+      }
+    }
+
     const prev = trip.status;
     trip.status = "cancelled";
+    trip.driverEnRouteToPickupAt = null;
     trip.driverArrivedAtPickupAt = null;
+    trip.rideInProgressAt = null;
     trip.etaToPickup = null;
     trip.etaToDropoff = null;
     trip.awaitingRiderCheckoutDeadlineAt = null;
     clearPickupEtaThrottle(id);
     await trip.save();
+    if (isRider && trip.riderCancelChargeStatus === "succeeded") {
+      void processRiderCancelFeePayout(trip._id).catch((e) =>
+        console.error("[tnc] processRiderCancelFeePayout", e)
+      );
+    }
     await cancelRiderCheckoutDeadline(id);
     await recordTripStatusEvent({
       tripId: trip._id,
@@ -137,6 +208,20 @@ export function createTripsRouter(deps) {
       actorUserId: uid,
       isDriverAdmin,
     });
+    if (isRider && cancelQuotePayload) {
+      res.json({
+        trip: out,
+        riderCancellationFee: {
+          feeCents: cancelQuotePayload.feeCents,
+          tier: cancelQuotePayload.tier,
+          explanation: cancelQuotePayload.explanation,
+          appTakePercent: cancelQuotePayload.appTakePercent,
+          appTakeCents: cancelQuotePayload.appTakeCents,
+          driverShareCents: cancelQuotePayload.driverShareCents,
+        },
+      });
+      return;
+    }
     res.json({ trip: out });
   }
 
@@ -212,6 +297,11 @@ export function createTripsRouter(deps) {
 
   r.get("/available", authMiddleware, requireRole("driver"), async (req, res) => {
     const me = await User.findById(req.userId).select("isAdmin").lean().exec();
+    const myProf = await DriverProfile.findOne({ userId: req.userId }).select("appTakePercent").lean().exec();
+    const viewerTakePct =
+      typeof myProf?.appTakePercent === "number" && Number.isFinite(myProf.appTakePercent)
+        ? myProf.appTakePercent
+        : 20;
     const filter = { status: "requested" };
     const trips = me?.isAdmin
       ? await Trip.find(filter).sort({ createdAt: -1 }).limit(50).populate({ path: "rider", select: "phone" }).exec()
@@ -222,7 +312,10 @@ export function createTripsRouter(deps) {
           me?.isAdmin && t.rider && typeof t.rider === "object" && t.rider.phone
             ? String(t.rider.phone).trim()
             : undefined;
-        return serializeTrip(t, phone ? { riderPhone: phone } : {});
+        return serializeTrip(t, {
+          ...(phone ? { riderPhone: phone } : {}),
+          driverFareDisplayAppTakePercent: viewerTakePct,
+        });
       }),
     });
   });
@@ -335,6 +428,32 @@ export function createTripsRouter(deps) {
     }
   });
 
+  /** Driver: marks start of "en route to pickup" for rider cancel-fee clock (not tied to accept time). */
+  r.post("/:id/driver-en-route", authMiddleware, requireRole("driver"), async (req, res) => {
+    const id = req.params.id;
+    if (!mongoose.isValidObjectId(id)) {
+      res.status(400).json({ error: "Invalid id" });
+      return;
+    }
+    const trip = await Trip.findById(id).exec();
+    if (!trip || tripDriverIdString(trip) !== req.userId) {
+      res.status(403).json({ error: "Forbidden" });
+      return;
+    }
+    if (trip.status !== "accepted") {
+      res.status(400).json({ error: "Trip must be accepted" });
+      return;
+    }
+    const now = new Date();
+    if (!trip.driverEnRouteToPickupAt) {
+      trip.driverEnRouteToPickupAt = now;
+      await trip.save();
+    }
+    const out = await loadTripSerialized(id);
+    deps.onTripUpdated(out);
+    res.json({ trip: out });
+  });
+
   r.post("/:id/start-ride", authMiddleware, requireRole("driver"), async (req, res) => {
     const id = req.params.id;
     if (!mongoose.isValidObjectId(id)) {
@@ -376,6 +495,7 @@ export function createTripsRouter(deps) {
       }
     }
     trip.status = "in_progress";
+    trip.rideInProgressAt = now;
     trip.driverArrivedAtPickupAt = null;
     trip.etaToPickup = null;
     trip.etaToDropoff = null;
@@ -577,12 +697,26 @@ export function createTripsRouter(deps) {
       res.status(400).json({ error: "Invalid id" });
       return;
     }
-    const trip = await Trip.findById(id).select("rider status fareChargeStatus stripePaymentIntentId").exec();
+    const trip = await Trip.findById(id)
+      .select(
+        "rider status fareChargeStatus stripePaymentIntentId riderCancelChargeStatus stripeCancelPaymentIntentId"
+      )
+      .exec();
     if (!trip || String(trip.rider) !== String(req.userId)) {
       res.status(403).json({ error: "Forbidden" });
       return;
     }
-    if (trip.status !== "completed" || trip.fareChargeStatus !== "requires_action" || !trip.stripePaymentIntentId) {
+    const farePending =
+      trip.status === "completed" &&
+      trip.fareChargeStatus === "requires_action" &&
+      typeof trip.stripePaymentIntentId === "string" &&
+      trip.stripePaymentIntentId.trim().length > 0;
+    const cancelPending =
+      trip.status === "cancelled" &&
+      trip.riderCancelChargeStatus === "requires_action" &&
+      typeof trip.stripeCancelPaymentIntentId === "string" &&
+      trip.stripeCancelPaymentIntentId.trim().length > 0;
+    if (!farePending && !cancelPending) {
       res.status(400).json({ error: "No pending payment confirmation for this trip" });
       return;
     }
@@ -590,9 +724,10 @@ export function createTripsRouter(deps) {
       res.status(503).json({ error: "Payments not configured" });
       return;
     }
+    const piId = farePending ? trip.stripePaymentIntentId.trim() : trip.stripeCancelPaymentIntentId.trim();
     try {
       const stripe = getStripe();
-      const pi = await stripe.paymentIntents.retrieve(trip.stripePaymentIntentId);
+      const pi = await stripe.paymentIntents.retrieve(piId);
       if (pi.status !== "requires_action" && pi.status !== "requires_confirmation") {
         res.status(400).json({ error: "Payment no longer requires action" });
         return;
@@ -636,6 +771,38 @@ export function createTripsRouter(deps) {
     res.json({ trip: result.trip });
   });
 
+  /** Rider: refresh cancellation fee charge from Stripe after 3DS (cancelled trip). */
+  r.post("/:id/reconcile-cancel-charge", authMiddleware, requireRole("rider"), async (req, res) => {
+    const id = req.params.id;
+    if (!mongoose.isValidObjectId(id)) {
+      res.status(400).json({ error: "Invalid id" });
+      return;
+    }
+    const result = await reconcileRiderCancelChargeFromStripe(id, req.userId);
+    if (!result.ok) {
+      const err = result.error;
+      if (err === "forbidden") {
+        res.status(403).json({ error: "Forbidden" });
+        return;
+      }
+      if (err === "not_found") {
+        res.status(404).json({ error: "Not found" });
+        return;
+      }
+      if (err === "stripe_disabled" || err === "stripe_unconfigured") {
+        res.status(503).json({ error: "Payments not configured" });
+        return;
+      }
+      if (err === "not_cancelled" || err === "no_payment_intent") {
+        res.status(400).json({ error: err });
+        return;
+      }
+      res.status(400).json({ error: err || "reconcile_failed" });
+      return;
+    }
+    res.json({ trip: result.trip });
+  });
+
   /** Rider: new charge attempt after failure, no card, or missing estimate (completed trip only). */
   r.post("/:id/retry-fare-charge", authMiddleware, requireRole("rider"), async (req, res) => {
     const id = req.params.id;
@@ -668,6 +835,38 @@ export function createTripsRouter(deps) {
     res.json({ trip: result.trip });
   });
 
+  /** Rider: retry cancellation fee charge (cancelled trip, failed / no card / Stripe was off). */
+  r.post("/:id/retry-cancel-charge", authMiddleware, requireRole("rider"), async (req, res) => {
+    const id = req.params.id;
+    if (!mongoose.isValidObjectId(id)) {
+      res.status(400).json({ error: "Invalid id" });
+      return;
+    }
+    const result = await riderRetryCancelCharge(id, req.userId);
+    if (!result.ok) {
+      const err = result.error;
+      if (err === "forbidden") {
+        res.status(403).json({ error: "Forbidden" });
+        return;
+      }
+      if (err === "not_found") {
+        res.status(404).json({ error: "Not found" });
+        return;
+      }
+      if (err === "stripe_disabled") {
+        res.status(503).json({ error: "Payments not configured" });
+        return;
+      }
+      if (err === "not_cancelled" || err === "not_retryable") {
+        res.status(400).json({ error: err });
+        return;
+      }
+      res.status(400).json({ error: err || "retry_failed" });
+      return;
+    }
+    res.json({ trip: result.trip });
+  });
+
   /** Driver: rider sees "driver has arrived" while status is accepted. */
   r.post("/:id/driver-arrived-pickup", authMiddleware, requireRole("driver"), async (req, res) => {
     const id = req.params.id;
@@ -684,7 +883,16 @@ export function createTripsRouter(deps) {
       res.status(400).json({ error: "Trip must be accepted (en route to pickup)" });
       return;
     }
-    trip.driverArrivedAtPickupAt = new Date();
+    const arrivedAt = new Date();
+    if (!trip.driverEnRouteToPickupAt) {
+      const sec = trip.deadheadRoute?.durationSec;
+      if (typeof sec === "number" && sec > 0 && Number.isFinite(sec)) {
+        trip.driverEnRouteToPickupAt = new Date(arrivedAt.getTime() - sec * 1000);
+      } else {
+        trip.driverEnRouteToPickupAt = arrivedAt;
+      }
+    }
+    trip.driverArrivedAtPickupAt = arrivedAt;
     await trip.save();
     const out = await loadTripSerialized(id);
     deps.onTripUpdated(out);
@@ -713,6 +921,9 @@ export function createTripsRouter(deps) {
       return;
     }
     const now = new Date();
+    if (trip.status === "accepted" && !trip.driverEnRouteToPickupAt) {
+      trip.driverEnRouteToPickupAt = now;
+    }
     trip.driverLocation = { lat, lng, updatedAt: now };
     await trip.save();
     await DriverProfile.updateOne(
@@ -733,6 +944,26 @@ export function createTripsRouter(deps) {
     });
     deps.onTripUpdated(out);
     res.json({ trip: out });
+  });
+
+  /** Rider: quote cancel fee before clearing ride (same access as GET trip). */
+  r.get("/:id/cancellation-quote", authMiddleware, async (req, res) => {
+    const id = req.params.id;
+    if (!mongoose.isValidObjectId(id)) {
+      res.status(400).json({ error: "Invalid id" });
+      return;
+    }
+    const trip = await Trip.findById(id).lean().exec();
+    if (!trip) {
+      res.status(404).json({ error: "Not found" });
+      return;
+    }
+    if (String(trip.rider) !== req.userId) {
+      res.status(403).json({ error: "Forbidden" });
+      return;
+    }
+    const payload = await riderCancellationQuotePayload(trip);
+    res.json(payload);
   });
 
   r.get("/:id", authMiddleware, async (req, res) => {

@@ -527,7 +527,34 @@ function completedTripNeedsPaymentResolution(trip) {
   return !["succeeded", "waived", "skipped_stripe_disabled"].includes(s);
 }
 
+/** Cancelled ride but cancellation fee still needs attention (3DS, retry, etc.). */
+function cancelledTripNeedsCancelChargeResolution(trip) {
+  if (!trip || trip.status !== "cancelled") return false;
+  const s = trip.riderCancelCharge?.status;
+  if (!s) return false;
+  return !["succeeded", "waived", "skipped_stripe_disabled"].includes(s);
+}
+
+function postCheckoutCancelRetryable(status) {
+  return (
+    status === "failed" || status === "skipped_no_payment_method" || status === "skipped_stripe_disabled"
+  );
+}
+
+function postCheckoutBillingRetryable(trip) {
+  if (trip?.status === "cancelled") return postCheckoutCancelRetryable(trip.riderCancelCharge?.status);
+  return postCheckoutFareRetryable(trip?.fareCharge?.status);
+}
+
 function postCheckoutPaymentTitle(trip) {
+  if (trip?.status === "cancelled" && trip.riderCancelCharge?.status) {
+    const s = trip.riderCancelCharge.status;
+    if (s === "requires_action") return "Confirm cancellation fee";
+    if (s === "failed") return "Cancellation fee didn’t go through";
+    if (s === "skipped_no_payment_method") return "No saved card";
+    if (s === "skipped_below_minimum") return "Charge below card minimum";
+    return "Cancellation fee";
+  }
   const s = trip?.fareCharge?.status;
   if (s === "requires_action") return "Confirm payment";
   if (s === "failed") return "Payment didn’t go through";
@@ -538,6 +565,23 @@ function postCheckoutPaymentTitle(trip) {
 }
 
 function postCheckoutPaymentDetail(trip) {
+  if (trip?.status === "cancelled" && trip.riderCancelCharge?.status) {
+    const s = trip.riderCancelCharge.status;
+    const err = trip.riderCancelCharge.error;
+    if (s === "requires_action") {
+      return "Your bank needs a quick verification for the cancellation fee. Tap Continue, then complete the prompt.";
+    }
+    if (s === "failed") {
+      return err ? String(err) : "The card charge failed. You can try again or use a different card in Payment methods.";
+    }
+    if (s === "skipped_no_payment_method") {
+      return "Add a default card in Payment methods, then try again or contact support if you still owe a fee.";
+    }
+    if (s === "skipped_below_minimum") {
+      return "The fee was below the card network minimum. No charge was made.";
+    }
+    return err ? String(err) : "This ride was cancelled, but billing needs attention.";
+  }
   const s = trip?.fareCharge?.status;
   const err = trip?.fareCharge?.error;
   if (s === "requires_action") {
@@ -565,6 +609,18 @@ function formatFareChargeAmountLine(trip) {
   const c = (fc.currency || "usd").toLowerCase();
   const prefix = c === "usd" ? "$" : `${c.toUpperCase()} `;
   return `Amount: ${prefix}${(cents / 100).toFixed(2)}`;
+}
+
+function formatPostCheckoutAmountLine(trip) {
+  if (trip?.status === "cancelled" && trip.riderCancelCharge) {
+    const fc = trip.riderCancelCharge;
+    if (fc.amountCents == null || !Number.isFinite(Number(fc.amountCents))) return null;
+    const cents = Math.round(Number(fc.amountCents));
+    const c = String(fc.currency || "usd").toLowerCase();
+    const prefix = c === "usd" ? "$" : `${c.toUpperCase()} `;
+    return `Amount: ${prefix}${(cents / 100).toFixed(2)}`;
+  }
+  return formatFareChargeAmountLine(trip);
 }
 
 function finiteLatLngObject(p) {
@@ -1055,6 +1111,15 @@ export default function App() {
     if (!nextTrip) return;
     if (nextTrip.status === "cancelled") {
       setTripRouteCoords(null);
+      if (cancelledTripNeedsCancelChargeResolution(nextTrip)) {
+        setTrip((prev) => {
+          if (!prev || String(prev._id) !== String(nextTrip._id)) return nextTrip;
+          const merged = { ...prev, ...nextTrip };
+          if (prev.driverProfile && !nextTrip.driverProfile) merged.driverProfile = prev.driverProfile;
+          return merged;
+        });
+        return;
+      }
       if (tripDockClosingRef.current) return;
       tripDockClosingRef.current = true;
       setRideInterstitialReset(true);
@@ -1135,7 +1200,8 @@ export default function App() {
           const st = trip.status;
           const persistActiveLeg =
             RIDER_TRIP_MAP_STATUSES.includes(st) ||
-            (st === "completed" && completedTripNeedsPaymentResolution(trip));
+            (st === "completed" && completedTripNeedsPaymentResolution(trip)) ||
+            (st === "cancelled" && cancelledTripNeedsCancelChargeResolution(trip));
           if (persistActiveLeg) {
             await AsyncStorage.setItem(RIDER_ACTIVE_TRIP_ID_KEY, curId);
           } else {
@@ -1167,19 +1233,30 @@ export default function App() {
   const reconcileFareChargeAndMaybeExit = useCallback(
     async (tripIdStr) => {
       if (!token || !tripIdStr) return;
-      const rec = await api(`/trips/${tripIdStr}/reconcile-fare-charge`, { method: "POST", token });
+      const path =
+        trip?.status === "cancelled"
+          ? `/trips/${tripIdStr}/reconcile-cancel-charge`
+          : `/trips/${tripIdStr}/reconcile-fare-charge`;
+      const rec = await api(path, { method: "POST", token });
       const next = rec?.trip;
-      if (next && !completedTripNeedsPaymentResolution(next)) {
+      if (
+        next &&
+        !completedTripNeedsPaymentResolution(next) &&
+        !cancelledTripNeedsCancelChargeResolution(next)
+      ) {
         exitPostCheckoutPaymentToPlanning(next._id);
       } else if (next) {
         applyIncomingTrip(next);
       }
     },
-    [token, applyIncomingTrip, exitPostCheckoutPaymentToPlanning]
+    [token, applyIncomingTrip, exitPostCheckoutPaymentToPlanning, trip?.status]
   );
 
   const runPostCheckoutBankVerification = useCallback(async () => {
-    if (!token || !trip?._id || trip.status !== "completed") return;
+    if (!token || !trip?._id) return;
+    const needs3ds =
+      trip.fareCharge?.requiresAction === true || trip.riderCancelCharge?.requiresAction === true;
+    if (!needs3ds) return;
     if (Platform.OS === "web") return;
     setPostCheckoutPaymentBusy(true);
     try {
@@ -1204,21 +1281,17 @@ export default function App() {
     if (!token || !trip?._id) return;
     setPostCheckoutPaymentBusy(true);
     try {
-      await reconcileFareChargeAndMaybeExit(String(trip._id));
-    } catch (e) {
-      Alert.alert("Payment", e?.message ? String(e.message) : String(e));
-    } finally {
-      setPostCheckoutPaymentBusy(false);
-    }
-  }, [token, trip?._id, reconcileFareChargeAndMaybeExit]);
-
-  const runPostCheckoutFareRetry = useCallback(async () => {
-    if (!token || !trip?._id) return;
-    setPostCheckoutPaymentBusy(true);
-    try {
-      const data = await api(`/trips/${trip._id}/retry-fare-charge`, { method: "POST", token });
-      const next = data?.trip;
-      if (next && !completedTripNeedsPaymentResolution(next)) {
+      const path =
+        trip.status === "cancelled"
+          ? `/trips/${trip._id}/reconcile-cancel-charge`
+          : `/trips/${trip._id}/reconcile-fare-charge`;
+      const rec = await api(path, { method: "POST", token });
+      const next = rec?.trip;
+      if (
+        next &&
+        !completedTripNeedsPaymentResolution(next) &&
+        !cancelledTripNeedsCancelChargeResolution(next)
+      ) {
         exitPostCheckoutPaymentToPlanning(next._id);
       } else if (next) {
         applyIncomingTrip(next);
@@ -1228,7 +1301,33 @@ export default function App() {
     } finally {
       setPostCheckoutPaymentBusy(false);
     }
-  }, [token, trip?._id, applyIncomingTrip, exitPostCheckoutPaymentToPlanning]);
+  }, [token, trip?._id, trip?.status, applyIncomingTrip, exitPostCheckoutPaymentToPlanning]);
+
+  const runPostCheckoutFareRetry = useCallback(async () => {
+    if (!token || !trip?._id) return;
+    setPostCheckoutPaymentBusy(true);
+    try {
+      const path =
+        trip.status === "cancelled"
+          ? `/trips/${trip._id}/retry-cancel-charge`
+          : `/trips/${trip._id}/retry-fare-charge`;
+      const data = await api(path, { method: "POST", token });
+      const next = data?.trip;
+      if (
+        next &&
+        !completedTripNeedsPaymentResolution(next) &&
+        !cancelledTripNeedsCancelChargeResolution(next)
+      ) {
+        exitPostCheckoutPaymentToPlanning(next._id);
+      } else if (next) {
+        applyIncomingTrip(next);
+      }
+    } catch (e) {
+      Alert.alert("Payment", e?.message ? String(e.message) : String(e));
+    } finally {
+      setPostCheckoutPaymentBusy(false);
+    }
+  }, [token, trip?._id, trip?.status, applyIncomingTrip, exitPostCheckoutPaymentToPlanning]);
 
   useEffect(() => {
     if (trip?.status !== "awaiting_rider_checkout") {
@@ -2338,7 +2437,7 @@ export default function App() {
     }
   };
 
-  /** Testing: cancel the trip on the server and reset local trip state. */
+  /** Cancel the trip on the server and reset local trip state (shows fee quote before confirm). */
   const clearRide = async () => {
     const t = trip;
     if (!t) return;
@@ -2356,19 +2455,46 @@ export default function App() {
       Alert.alert("Clear ride", "Missing trip id — try logging out and back in.");
       return;
     }
-    setBusy(true);
+    let quote;
     try {
-      await api("/trips/cancel", { method: "POST", token, body: { tripId: idStr } });
-      if (!tripDockClosingRef.current) {
-        tripDockClosingRef.current = true;
-        setRideInterstitialReset(true);
-        returnToPlanningAfterTripEnds();
-      }
+      quote = await api(`/trips/${idStr}/cancellation-quote`, { token });
     } catch (e) {
-      Alert.alert("Clear ride failed", e?.message ? String(e.message) : String(e));
-    } finally {
-      setBusy(false);
+      Alert.alert("Couldn’t load cancel fee", e?.message ? String(e.message) : String(e));
+      return;
     }
+    const fee = typeof quote.feeCents === "number" ? quote.feeCents : 0;
+    const msg =
+      fee > 0
+        ? `Cancel may cost up to $${(fee / 100).toFixed(2)}.`
+        : "No cancellation fee applies right now.";
+    Alert.alert("Cancel ride?", msg, [
+      { text: "Keep ride", style: "cancel" },
+      {
+        text: "Cancel ride",
+        style: "destructive",
+        onPress: () => {
+          void (async () => {
+            setBusy(true);
+            try {
+              const data = await api("/trips/cancel", { method: "POST", token, body: { tripId: idStr } });
+              const rawTrip = data?.trip;
+              if (rawTrip && typeof rawTrip === "object") {
+                const normalized = normalizeTripForClient(rawTrip, t.pickup, t.dropoff);
+                applyIncomingTrip(normalized);
+              } else if (!tripDockClosingRef.current) {
+                tripDockClosingRef.current = true;
+                setRideInterstitialReset(true);
+                returnToPlanningAfterTripEnds();
+              }
+            } catch (err) {
+              Alert.alert("Clear ride failed", err?.message ? String(err.message) : String(err));
+            } finally {
+              setBusy(false);
+            }
+          })();
+        },
+      },
+    ]);
   };
 
   const displayPickup = trip?.pickup || pickup;
@@ -3286,8 +3412,13 @@ export default function App() {
       ? Math.round(Number(trip.riderTipAmountCents))
       : 0;
 
-  const postCheckoutPaymentModalVisible = Boolean(trip && completedTripNeedsPaymentResolution(trip));
-  const postCheckoutFareStatus = trip?.fareCharge?.status;
+  const postCheckoutPaymentModalVisible = Boolean(
+    trip && (completedTripNeedsPaymentResolution(trip) || cancelledTripNeedsCancelChargeResolution(trip))
+  );
+  const postCheckoutFareStatus =
+    trip && cancelledTripNeedsCancelChargeResolution(trip)
+      ? trip.riderCancelCharge?.status
+      : trip?.fareCharge?.status;
 
   if (!fontsLoaded) {
     return <ParkCityRidesLaunchScreen />;
@@ -3736,13 +3867,13 @@ export default function App() {
           <View style={[styles.checkoutModalCard, styles.postCheckoutPaymentCard]}>
             <Text style={styles.checkoutModalTitle}>{postCheckoutPaymentTitle(trip)}</Text>
             <Text style={styles.checkoutModalSubtitle}>{postCheckoutPaymentDetail(trip)}</Text>
-            {formatFareChargeAmountLine(trip) ? (
-              <Text style={styles.postCheckoutAmountLine}>{formatFareChargeAmountLine(trip)}</Text>
+            {formatPostCheckoutAmountLine(trip) ? (
+              <Text style={styles.postCheckoutAmountLine}>{formatPostCheckoutAmountLine(trip)}</Text>
             ) : null}
             {postCheckoutFareStatus === "requires_action" && Platform.OS === "web" ? (
               <>
                 <Text style={styles.checkoutTipModeHint}>
-                  Bank verification for this charge isn’t available on web. Open the TNC Rider app on your phone to
+                  Bank verification for this payment isn’t available on web. Open the TNC Rider app on your phone to
                   finish.
                 </Text>
                 <Pressable
@@ -3791,7 +3922,7 @@ export default function App() {
             ) : null}
             {postCheckoutFareStatus !== "requires_action" ? (
               <>
-                {postCheckoutFareRetryable(postCheckoutFareStatus) ? (
+                {postCheckoutBillingRetryable(trip) ? (
                   <Pressable
                     style={[styles.checkoutConfirmBtn, postCheckoutPaymentBusy && styles.addCardModalBtnDisabled]}
                     disabled={postCheckoutPaymentBusy}
@@ -4111,11 +4242,13 @@ export default function App() {
                             trip.status === "in_progress" ||
                             trip.status === "awaiting_rider_checkout"
                           ? riderAcceptedInProgressBannerCopy(trip, driverCoord)
-                          : trip.status === "completed"
-                            ? completedTripNeedsPaymentResolution(trip)
-                              ? "Ride complete — finish payment using the dialog on screen."
-                              : "Ride complete."
-                            : `Trip: ${trip.status}`}
+                          : trip.status === "cancelled" && cancelledTripNeedsCancelChargeResolution(trip)
+                            ? "Ride cancelled — finish the cancellation fee using the dialog on screen."
+                            : trip.status === "completed"
+                              ? completedTripNeedsPaymentResolution(trip)
+                                ? "Ride complete — finish payment using the dialog on screen."
+                                : "Ride complete."
+                              : `Trip: ${trip.status}`}
                     </Text>
                     {(trip.status === "accepted" ||
                       trip.status === "in_progress" ||
@@ -4650,11 +4783,13 @@ export default function App() {
                         trip.status === "in_progress" ||
                         trip.status === "awaiting_rider_checkout"
                       ? riderAcceptedInProgressBannerCopy(trip, driverCoord)
-                      : trip.status === "completed"
-                        ? completedTripNeedsPaymentResolution(trip)
-                          ? "Ride complete — finish payment using the dialog on screen."
-                          : "Ride complete."
-                        : `Trip: ${trip.status}`}
+                      : trip.status === "cancelled" && cancelledTripNeedsCancelChargeResolution(trip)
+                        ? "Ride cancelled — finish the cancellation fee using the dialog on screen."
+                        : trip.status === "completed"
+                          ? completedTripNeedsPaymentResolution(trip)
+                            ? "Ride complete — finish payment using the dialog on screen."
+                            : "Ride complete."
+                          : `Trip: ${trip.status}`}
                 </Text>
                 {(trip.status === "accepted" ||
                   trip.status === "in_progress" ||
