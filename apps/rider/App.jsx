@@ -96,11 +96,13 @@ function tripNativeSheetHeightFraction(t) {
 const MAP_LOCATE_FAB_SHEET_GAP = 10;
 /** Deferred ms before clearing trip state — same path for accepted vs in_progress so complete/cancel never diverge on native teardown. */
 const RIDER_TRIP_END_DEFER_MS = 320;
+/** After Book ride: let the CTA press / Gorhom gesture finish before swapping plan-dock → trip-dock (avoids native crashes). */
+const RIDER_BOOK_RIDE_SHEET_DEFER_MS = 120;
 /** Last valid snap index for PLANNING_SNAP_POINTS (dynamic sizing off — indices must stay in range). */
 const PLANNING_SNAP_MAX_INDEX = PLANNING_SNAP_POINTS.length - 1;
 
 /** Match server default `TNC_MAX_TIP_USD` in apps/api (used only to clamp UI). */
-const RIDER_TIP_MAX_USD_FALLBACK = 500;
+const RIDER_TIP_MAX_USD_FALLBACK = 150;
 /** Fares below this use fixed $ presets; at or above use percentage presets. */
 const RIDER_CHECKOUT_TIP_FARE_THRESHOLD_USD = 30;
 
@@ -2446,33 +2448,35 @@ export default function App() {
       }
       const normalized = normalizeTripForClient(t, pickupForGeo, dropoffForGeo);
       clearBusyInFinally = false;
-      if (__DEV__) console.warn("[tnc rider] requestRide: POST ok, scheduling setTrip (after interactions + rAF)");
-      /** Unmounting Gorhom BottomSheet in the same tick as the Book CTA often crashes native (gesture handler). */
+      if (__DEV__) console.warn("[tnc rider] requestRide: POST ok, scheduling setTrip (deferred sheet swap)");
+      /** Match trip-end teardown: Gorhom BottomSheet key flip on the Book press tick crashes without staggered deferral. */
       InteractionManager.runAfterInteractions(() => {
-        if (__DEV__) console.warn("[tnc rider] requestRide: InteractionManager callback");
         requestAnimationFrame(() => {
-          if (__DEV__) console.warn("[tnc rider] requestRide: calling setTrip now");
-          if (addressBlurTimerRef.current) {
-            clearTimeout(addressBlurTimerRef.current);
-            addressBlurTimerRef.current = null;
-          }
-          const carryForwardRoute =
-            planRouteCoords?.length >= 2
-              ? planRouteCoords
-              : [
-                  { latitude: puLat, longitude: puLng },
-                  { latitude: doLat, longitude: doLng },
-                ];
-          setTripRouteCoords(carryForwardRoute);
-          setTrip(normalized);
-          setDriverLive(null);
-          setBusy(false);
-          if (__DEV__) console.warn("[tnc rider] requestRide: setTrip dispatched");
-          if (!pushPromptAfterFirstBookRef.current) {
-            void registerExpoPushWithApi({ api, authToken: token }).then((r) => {
-              if (r?.ok) pushPromptAfterFirstBookRef.current = true;
-            });
-          }
+          requestAnimationFrame(() => {
+            setTimeout(() => {
+              if (__DEV__) console.warn("[tnc rider] requestRide: applying trip state");
+              if (addressBlurTimerRef.current) {
+                clearTimeout(addressBlurTimerRef.current);
+                addressBlurTimerRef.current = null;
+              }
+              const carryForwardRoute =
+                planRouteCoords?.length >= 2
+                  ? planRouteCoords
+                  : [
+                      { latitude: puLat, longitude: puLng },
+                      { latitude: doLat, longitude: doLng },
+                    ];
+              setTripRouteCoords(carryForwardRoute);
+              setTrip(normalized);
+              setDriverLive(null);
+              setBusy(false);
+              if (!pushPromptAfterFirstBookRef.current) {
+                void registerExpoPushWithApi({ api, authToken: token }).then((r) => {
+                  if (r?.ok) pushPromptAfterFirstBookRef.current = true;
+                });
+              }
+            }, RIDER_BOOK_RIDE_SHEET_DEFER_MS);
+          });
         });
       });
     } catch (e) {
@@ -3753,9 +3757,6 @@ export default function App() {
                   </Pressable>
                 </View>
               )}
-              <Text style={styles.checkoutMaxTipNote}>
-                Max tip for this ride: ${(checkoutMaxTipCents / 100).toFixed(2)}
-              </Text>
             </ScrollView>
             <Pressable
               style={[
@@ -3888,10 +3889,9 @@ export default function App() {
                   </Text>
                 </Pressable>
               </View>
-              <Text style={styles.checkoutMaxTipNote}>
-                Max ${(checkoutMaxTipCents / 100).toFixed(2)}
-                {inTripTipBusy ? " · Saving…" : ""}
-              </Text>
+              {inTripTipBusy ? (
+                <Text style={[styles.checkoutTipModeHint, { marginTop: 10 }]}>Saving…</Text>
+              ) : null}
             </ScrollView>
             <Pressable
               style={styles.inTripTipModalDoneBtn}
@@ -5972,12 +5972,6 @@ const styles = StyleSheet.create({
     ...pj.r,
     color: "#0f172a",
     backgroundColor: "#f8fafc",
-  },
-  checkoutMaxTipNote: {
-    fontSize: 12,
-    ...pj.r,
-    color: "#94a3b8",
-    marginTop: 10,
   },
   inTripTipSection: {
     marginTop: 8,

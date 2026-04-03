@@ -14,7 +14,7 @@ function numEnv(name, fallback) {
  * Max tip in cents: min(TNC_MAX_TIP_USD * 100, 200% of fare when fare > 0; else absolute cap only).
  */
 export function maxTipCentsAllowed(fareCents) {
-  const absMax = Math.round(numEnv("TNC_MAX_TIP_USD", 500) * 100);
+  const absMax = Math.round(numEnv("TNC_MAX_TIP_USD", 150) * 100);
   if (!fareCents || fareCents <= 0) return absMax;
   return Math.min(absMax, Math.round(fareCents * 2));
 }
