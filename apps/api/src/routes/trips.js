@@ -304,13 +304,13 @@ export function createTripsRouter(deps) {
         : 20;
     const filter = { status: "requested" };
     const trips = me?.isAdmin
-      ? await Trip.find(filter).sort({ createdAt: -1 }).limit(50).populate({ path: "rider", select: "phone" }).exec()
+      ? await Trip.find(filter).sort({ createdAt: -1 }).limit(50).populate({ path: "rider", select: "phoneE164" }).exec()
       : await Trip.find(filter).sort({ createdAt: -1 }).limit(50).exec();
     res.json({
       trips: trips.map((t) => {
         const phone =
-          me?.isAdmin && t.rider && typeof t.rider === "object" && t.rider.phone
-            ? String(t.rider.phone).trim()
+          me?.isAdmin && t.rider && typeof t.rider === "object" && t.rider.phoneE164
+            ? String(t.rider.phoneE164).trim()
             : undefined;
         return serializeTrip(t, {
           ...(phone ? { riderPhone: phone } : {}),

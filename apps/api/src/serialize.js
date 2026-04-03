@@ -118,7 +118,6 @@ export function serializeUserMe(user, driverProfile) {
     roles,
     isAdmin: Boolean(user.isAdmin),
     phoneE164: trimOrEmpty(user.phoneE164),
-    phone: trimOrEmpty(user.phone),
     firstName: trimOrEmpty(user.firstName),
     lastName: trimOrEmpty(user.lastName),
     avatarUrl: trimOrEmpty(user.avatarUrl),

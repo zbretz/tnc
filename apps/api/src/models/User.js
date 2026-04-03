@@ -28,11 +28,9 @@ const userSchema = new mongoose.Schema(
     },
     accountStatus: { type: String, enum: ["active", "suspended"], default: "active", index: true },
 
-    /** E.164 normalized phone; unique for OTP login. */
+    /** E.164 phone; unique; OTP, SMS, admin trip display. */
     phoneE164: { type: String, trim: true, sparse: true, unique: true },
     phoneVerifiedAt: { type: Date },
-    /** Legacy free-form phone string (admin display on trip cards). */
-    phone: { type: String, default: "", trim: true },
 
     /** Driver-facing legal / account name split (rider sees last initial only). */
     firstName: { type: String, default: "", trim: true },

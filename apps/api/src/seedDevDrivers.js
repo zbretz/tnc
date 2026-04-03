@@ -10,7 +10,6 @@ const SEEDS = [
     lastName: "Rivera",
     role: "driver",
     isAdmin: true,
-    phone: "+1-555-0100",
     phoneE164: "+15550100100",
     vehicle: { make: "Toyota", model: "Camry", color: "Silver", licensePlate: "TNC-001", photoUrl: "" },
   },
@@ -59,7 +58,7 @@ export async function seedDevDriversIfNeeded() {
       avatarUrl: "",
       vehicle: s.vehicle,
       isAdmin: Boolean(s.isAdmin),
-      phone: typeof s.phone === "string" ? s.phone : "",
+      ...(s.phoneE164 ? { phoneE164: s.phoneE164, phoneVerifiedAt: new Date() } : {}),
     });
     await DriverProfile.create({
       userId: created._id,
@@ -77,7 +76,7 @@ export async function seedDevDriversIfNeeded() {
   }
   await User.updateOne(
     { email: "driver1@tnc.local" },
-    { $set: { isAdmin: true, phone: "+1-555-0100", phoneE164: "+15550100100", phoneVerifiedAt: new Date() } }
+    { $set: { isAdmin: true, phoneE164: "+15550100100", phoneVerifiedAt: new Date() } }
   ).exec();
 
   for (const s of SEEDS) {
@@ -85,7 +84,7 @@ export async function seedDevDriversIfNeeded() {
     if (s.phoneE164) {
       await User.updateOne(
         { email },
-        { $set: { phoneE164: s.phoneE164, phoneVerifiedAt: new Date(), phone: s.phoneE164 } }
+        { $set: { phoneE164: s.phoneE164, phoneVerifiedAt: new Date() } }
       ).exec();
     }
     const u = await User.findOne({ email }).exec();

@@ -211,7 +211,6 @@ r.post("/otp/verify", async (req, res) => {
     return;
   }
   user.phoneVerifiedAt = new Date();
-  if (!user.phone) user.phone = phoneE164;
   /**
    * Rider app booking and payments require JWT role "rider". Driver-only accounts (seed / driver signup)
    * still receive OTP on the rider app; grant rider so they can book without a separate account.
@@ -269,7 +268,6 @@ r.post("/otp/complete-profile", async (req, res) => {
     role: "rider",
     roles: ["rider"],
     phoneVerifiedAt: new Date(),
-    phone: phoneE164,
   });
   const token = signToken(String(user._id), user);
   const fresh = await User.findById(user._id).select("-passwordHash").exec();
@@ -344,7 +342,6 @@ r.post("/otp/complete-driver-profile", async (req, res) => {
     role: "driver",
     roles: ["driver"],
     phoneVerifiedAt: new Date(),
-    phone: phoneE164,
     avatarUrl: av,
     vehicle: veh,
   });
@@ -402,7 +399,18 @@ r.post("/register", async (req, res) => {
     roles: [role],
   };
   if (role === "rider" && phoneIn != null && String(phoneIn).trim()) {
-    doc.phone = String(phoneIn).trim().slice(0, 32);
+    const p = normalizePhoneE164(phoneIn);
+    if (!p) {
+      res.status(400).json({ error: "Invalid phone number" });
+      return;
+    }
+    const taken = await User.findOne({ phoneE164: p }).lean().exec();
+    if (taken) {
+      res.status(409).json({ error: "Phone number already in use" });
+      return;
+    }
+    doc.phoneE164 = p;
+    doc.phoneVerifiedAt = new Date();
   }
   const user = await User.create(doc);
   const token = signToken(String(user._id), user);
@@ -699,10 +707,7 @@ r.patch("/me", authMiddleware, async (req, res) => {
       await DriverProfile.updateOne({ userId: user._id }, { $set: { availableForRequests: Boolean(on) } }).exec();
     }
   }
-  if (user.role === "rider" && phoneIn !== undefined) {
-    user.phone = String(phoneIn).trim().slice(0, 32);
-  }
-  if (isDriver && phoneIn !== undefined) {
+  if (phoneIn !== undefined) {
     const p = normalizePhoneE164(phoneIn);
     if (!p) {
       res.status(400).json({ error: "Invalid phone number" });
@@ -714,7 +719,7 @@ r.patch("/me", authMiddleware, async (req, res) => {
       return;
     }
     user.phoneE164 = p;
-    user.phone = p;
+    user.phoneVerifiedAt = new Date();
   }
   await user.save();
   if (driverProf && saveDriverProfile) {
