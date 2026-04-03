@@ -2,6 +2,7 @@ import mongoose from "mongoose";
 import { Trip } from "../models/Trip.js";
 import { getStripe, stripeEnabled } from "./stripe.js";
 import { serializeTripPopulated } from "../serialize.js";
+import { processDriverPayoutForTrip } from "./driverPayout.js";
 
 const POPULATE_DRIVER = { path: "driver", select: "-passwordHash" };
 
@@ -59,6 +60,7 @@ export async function reconcileTripFareChargeFromStripe(tripId, riderUserId) {
       trip.fareChargeAmountCents = amount;
     }
     await trip.save();
+    void processDriverPayoutForTrip(trip._id).catch((e) => console.error("[tnc] processDriverPayoutForTrip", e));
   } else if (status === "requires_action" || status === "requires_confirmation") {
     trip.fareChargeStatus = "requires_action";
     trip.fareChargeError = "";

@@ -115,6 +115,28 @@ const tripSchema = new mongoose.Schema(
     fareChargeCurrency: { type: String, default: "" },
     stripePaymentIntentId: { type: String, default: "" },
     fareChargeError: { type: String, default: "" },
+
+    /** Driver payout ledger (after successful rider charge). Tip 100% to driver; app take on fare only; full Stripe fee from driver side. */
+    driverPayoutStatus: {
+      type: String,
+      enum: [
+        "none",
+        "waived",
+        "skipped_no_driver",
+        "skipped_no_charge",
+        "pending_connect",
+        "paid",
+        "failed",
+      ],
+      default: "none",
+    },
+    driverPayoutAppTakeCents: { type: Number, default: null },
+    driverPayoutStripeFeeCents: { type: Number, default: null },
+    /** (fare − app take) + tip − stripe fee, floored at 0; amount sent via Connect transfer. */
+    driverPayoutNetCents: { type: Number, default: null },
+    driverPayoutTransferId: { type: String, default: "" },
+    driverPayoutError: { type: String, default: "" },
+    driverPayoutComputedAt: { type: Date, default: null },
   },
   { timestamps: true }
 );

@@ -2,9 +2,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
+  AppState,
   FlatList,
   Image,
   KeyboardAvoidingView,
+  Linking,
   Modal,
   Platform,
   Pressable,
@@ -375,6 +377,7 @@ export default function App() {
   const [adminFareAdjustmentDraft, setAdminFareAdjustmentDraft] = useState(100);
   const [adminFreeExplanationDraft, setAdminFreeExplanationDraft] = useState("");
   const [riderAdminOpen, setRiderAdminOpen] = useState(false);
+  const [driverSettingsOpen, setDriverSettingsOpen] = useState(false);
   const [activeDrivingCoords, setActiveDrivingCoords] = useState(null);
   const [previewDrivingCoords, setPreviewDrivingCoords] = useState(null);
   const [mapStyleId, setMapStyleId] = useState("default");
@@ -391,8 +394,10 @@ export default function App() {
   const [completingTrip, setCompletingTrip] = useState(false);
   /** Pre-login: GET /health against configured API. */
   const [apiHealth, setApiHealth] = useState(null);
-  /** landing | signIn | register (phone OTP) | registerProfile (after code) | dev */
+  /** landing | signIn | register (phone OTP) | registerProfile (after code) | registerPayouts (after profile, has JWT) | dev */
   const [authPhase, setAuthPhase] = useState("landing");
+  /** null = loading; Stripe payouts available on API */
+  const [regPaymentsEnabled, setRegPaymentsEnabled] = useState(null);
   const [devBypassAvailable, setDevBypassAvailable] = useState(false);
   const [driverPhone, setDriverPhone] = useState("");
   const [loginOtp, setLoginOtp] = useState("");
@@ -419,6 +424,7 @@ export default function App() {
   const [regAvatarUrl, setRegAvatarUrl] = useState(null);
   const [avatarUploadBusy, setAvatarUploadBusy] = useState(false);
   const [driverAvailable, setDriverAvailable] = useState(false);
+  const [stripeConnectBusy, setStripeConnectBusy] = useState(false);
 
   const retryApiHealth = useCallback(() => {
     setApiHealth("loading");
@@ -730,6 +736,101 @@ export default function App() {
     },
     [token, refreshSessionUser]
   );
+
+  const openDriverStripeConnect = useCallback(async () => {
+    if (!token) return;
+    setStripeConnectBusy(true);
+    try {
+      await api("/payments/connect/ensure-account", { method: "POST", token });
+      const link = await api("/payments/connect/account-link", { method: "POST", token });
+      const url = typeof link?.url === "string" ? link.url.trim() : "";
+      if (!url) throw new Error("No onboarding link from server.");
+      await Linking.openURL(url);
+    } catch (e) {
+      Alert.alert("Payout setup", String(e?.message || e));
+    } finally {
+      setStripeConnectBusy(false);
+    }
+  }, [token]);
+
+  const refreshDriverStripeConnect = useCallback(async () => {
+    if (!token) return;
+    setStripeConnectBusy(true);
+    try {
+      const r = await api("/payments/connect/sync", { method: "POST", token });
+      await refreshSessionUser(token);
+      const n = Array.isArray(r?.retriedTrips) ? r.retriedTrips.length : 0;
+      Alert.alert(
+        "Payout status",
+        n > 0 ? `Updated. Retried payout for ${n} trip(s).` : "Updated from Stripe."
+      );
+    } catch (e) {
+      Alert.alert("Payout status", String(e?.message || e));
+      try {
+        await refreshSessionUser(token);
+      } catch {
+        /* ignore */
+      }
+    } finally {
+      setStripeConnectBusy(false);
+    }
+  }, [token, refreshSessionUser]);
+
+  /** Same as refreshDriverStripeConnect but no success alert (registration step + AppState resume). */
+  const refreshDriverStripeConnectQuiet = useCallback(async () => {
+    if (!token) return;
+    setStripeConnectBusy(true);
+    try {
+      await api("/payments/connect/sync", { method: "POST", token });
+      await refreshSessionUser(token);
+    } catch {
+      try {
+        await refreshSessionUser(token);
+      } catch {
+        /* ignore */
+      }
+    } finally {
+      setStripeConnectBusy(false);
+    }
+  }, [token, refreshSessionUser]);
+
+  const finishRegistrationPayoutStep = useCallback(() => {
+    setAuthPhase("landing");
+    if (token) void loadAvailable(token);
+  }, [token, loadAvailable]);
+
+  useEffect(() => {
+    if (authPhase !== "registerPayouts") return undefined;
+    let cancelled = false;
+    setRegPaymentsEnabled(null);
+    (async () => {
+      try {
+        const cfg = await api("/payments/public-config");
+        if (!cancelled) setRegPaymentsEnabled(Boolean(cfg?.paymentsEnabled));
+      } catch {
+        if (!cancelled) setRegPaymentsEnabled(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [authPhase]);
+
+  useEffect(() => {
+    if (!token || authPhase !== "registerPayouts") return undefined;
+    const sub = AppState.addEventListener("change", (next) => {
+      if (next !== "active") return;
+      void (async () => {
+        try {
+          await api("/payments/connect/sync", { method: "POST", token });
+          await refreshSessionUser(token);
+        } catch {
+          /* offline or Stripe off */
+        }
+      })();
+    });
+    return () => sub.remove();
+  }, [token, authPhase, refreshSessionUser]);
 
   useEffect(() => {
     const id = setInterval(() => setRequestRelativeTick((n) => n + 1), 30000);
@@ -1180,15 +1281,17 @@ export default function App() {
       return;
     }
     const yearStr = regVehYear.trim();
-    let yearOpt;
-    if (yearStr) {
-      const y = parseInt(yearStr, 10);
-      if (!Number.isInteger(y)) {
-        setRegErr("Vehicle year must be a number.");
-        return;
-      }
-      yearOpt = y;
+    if (!yearStr) {
+      setRegErr("Vehicle year is required.");
+      return;
     }
+    const y = parseInt(yearStr, 10);
+    const maxYear = new Date().getFullYear() + 1;
+    if (!Number.isInteger(y) || y < 1900 || y > maxYear) {
+      setRegErr("Enter a valid vehicle year.");
+      return;
+    }
+    const yearOpt = y;
     setBusy(true);
     try {
       const { token: t, user } = await api("/auth/otp/complete-driver-profile", {
@@ -1201,9 +1304,9 @@ export default function App() {
           vehicle: {
             make: mk,
             model: md,
+            year: yearOpt,
             licensePlate: plate,
             color: regVehColor.trim(),
-            ...(yearOpt !== undefined ? { year: yearOpt } : {}),
           },
           ...(regAvatarUrl ? { avatarUrl: regAvatarUrl } : {}),
         },
@@ -1217,6 +1320,7 @@ export default function App() {
       setSessionUser(user || null);
       setPendingDriverSignupToken(null);
       setRegAvatarUrl(null);
+      setAuthPhase("registerPayouts");
       await loadAvailable(t);
     } catch (e) {
       setRegErr(String(e?.message || e));
@@ -1226,6 +1330,7 @@ export default function App() {
   };
 
   const logout = async () => {
+    setDriverSettingsOpen(false);
     watchRef.current?.remove();
     watchRef.current = null;
     socketRef.current?.disconnect();
@@ -1528,7 +1633,8 @@ export default function App() {
     />
   );
 
-  if (!token) {
+  const showAuthShell = !token || authPhase === "registerPayouts";
+  if (showAuthShell) {
     return (
       <KeyboardAvoidingView
         style={styles.authKeyboardRoot}
@@ -1556,7 +1662,81 @@ export default function App() {
             </View>
           ) : null}
 
-          {authPhase === "landing" ? (
+          {authPhase === "registerPayouts" && token ? (
+            <View style={{ flex: 1 }}>
+              <Text style={styles.signInTitle}>Set up payouts</Text>
+              <ScrollView
+                style={{ flex: 1 }}
+                contentContainerStyle={styles.regScrollContent}
+                keyboardShouldPersistTaps="handled"
+              >
+                <Text style={styles.regHint}>
+                  Complete this step to receive payouts. Skip if you prefer—you can finish in Settings later.
+                </Text>
+                {regPaymentsEnabled === null ? (
+                  <Text style={styles.regHint}>Checking…</Text>
+                ) : regPaymentsEnabled === false ? (
+                  <Text style={styles.regHint}>Payout setup is not available on this server yet.</Text>
+                ) : null}
+                {sessionUser?.stripeConnect?.payoutsEnabled ? (
+                  <Text style={styles.regPayoutSuccess}>Payouts ready.</Text>
+                ) : sessionUser?.stripeConnect?.detailsSubmitted ? (
+                  <Text style={styles.regHint}>Verifying. Return here after Stripe, or tap Refresh.</Text>
+                ) : regPaymentsEnabled ? (
+                  <Text style={styles.regHint}>Opens in your browser.</Text>
+                ) : null}
+                {regPaymentsEnabled ? (
+                  <View style={styles.driverPayoutActions}>
+                    {!sessionUser?.stripeConnect?.payoutsEnabled ? (
+                      <Pressable
+                        style={[styles.driverPayoutPrimaryBtn, stripeConnectBusy && styles.driverPayoutBtnDisabled]}
+                        onPress={() => void openDriverStripeConnect()}
+                        disabled={stripeConnectBusy}
+                        accessibilityRole="button"
+                      >
+                        <Text style={styles.driverPayoutPrimaryBtnText}>
+                          {stripeConnectBusy ? "Working…" : sessionUser?.stripeConnect?.detailsSubmitted ? "Continue in Stripe" : "Connect bank account"}
+                        </Text>
+                      </Pressable>
+                    ) : null}
+                    {!sessionUser?.stripeConnect?.payoutsEnabled ? (
+                      <Pressable
+                        style={[styles.driverPayoutSecondaryBtn, stripeConnectBusy && styles.driverPayoutBtnDisabled]}
+                        onPress={() => void refreshDriverStripeConnectQuiet()}
+                        disabled={stripeConnectBusy}
+                        accessibilityRole="button"
+                      >
+                        <Text style={styles.driverPayoutSecondaryBtnText}>
+                          {stripeConnectBusy ? "…" : "Refresh status"}
+                        </Text>
+                      </Pressable>
+                    ) : null}
+                  </View>
+                ) : null}
+                {sessionUser?.stripeConnect?.payoutsEnabled ? (
+                  <Pressable
+                    style={[styles.regSubmitBtn, busy && styles.btnDisabled]}
+                    onPress={finishRegistrationPayoutStep}
+                    disabled={busy}
+                    accessibilityRole="button"
+                  >
+                    <Text style={styles.regSubmitBtnText}>Continue to open requests</Text>
+                  </Pressable>
+                ) : (
+                  <Pressable
+                    style={[styles.regSkipPayoutsBtn, busy && styles.btnDisabled]}
+                    onPress={finishRegistrationPayoutStep}
+                    disabled={busy}
+                    accessibilityRole="button"
+                  >
+                    <Text style={styles.regSkipPayoutsBtnText}>Skip for now</Text>
+                  </Pressable>
+                )}
+              </ScrollView>
+            </View>
+          ) : null}
+
+          {authPhase !== "registerPayouts" && authPhase === "landing" ? (
             <View style={styles.landingBlock}>
               <Text style={styles.landingSubtitle}>
                 Sign in or create an account with your mobile number — we’ll text a code. No password.
@@ -1762,7 +1942,8 @@ export default function App() {
                 keyboardShouldPersistTaps="handled"
               >
                 <Text style={styles.regHint}>
-                  Phone verified. Complete your driver profile. You’ll sign in with SMS only from now on.
+                  Phone verified. Complete your driver profile. Next you will complete payout setup (or skip and finish
+                  in Settings). You’ll sign in with SMS only from now on.
                 </Text>
                 {regErr ? <Text style={styles.errText}>{regErr}</Text> : null}
                 <Text style={styles.regSectionTitle}>Your name</Text>
@@ -1834,7 +2015,7 @@ export default function App() {
                   placeholder="e.g. Camry"
                   placeholderTextColor="#94a3b8"
                 />
-                <Text style={styles.regLabel}>Year (optional)</Text>
+                <Text style={styles.regLabel}>Year</Text>
                 <TextInput
                   style={styles.regInput}
                   value={regVehYear}
@@ -2366,41 +2547,121 @@ export default function App() {
   return (
     <View style={styles.listWrap}>
       <StatusBar style="dark" />
-      <Text style={styles.listTitle}>Open requests</Text>
-      {signedInLine ? <Text style={styles.signedInLine}>{signedInLine}</Text> : null}
-      {token && sessionUser ? (
-        <View style={styles.profilePhotoRow}>
-          {sessionUser.avatarUrl ? (
-            <Image source={{ uri: sessionUser.avatarUrl }} style={styles.profilePhotoThumb} />
-          ) : (
-            <View style={[styles.profilePhotoThumb, styles.profilePhotoThumbPlaceholder]}>
-              <Text style={styles.profilePhotoPlaceholderText}>+</Text>
-            </View>
-          )}
+      <View style={styles.listHeaderRow}>
+        <View style={styles.listHeaderMain}>
+          <Text style={styles.listTitle}>Open requests</Text>
+          {signedInLine ? <Text style={styles.signedInLine}>{signedInLine}</Text> : null}
+        </View>
+        {token && sessionUser ? (
           <Pressable
-            style={styles.profilePhotoBtn}
-            onPress={openSignedInAvatarPicker}
-            disabled={avatarUploadBusy}
+            style={styles.listSettingsBtn}
+            onPress={() => setDriverSettingsOpen(true)}
             accessibilityRole="button"
-            accessibilityLabel="Update profile photo"
+            accessibilityLabel="Settings"
           >
-            <Text style={styles.profilePhotoBtnText}>
-              {avatarUploadBusy ? "Uploading…" : sessionUser.avatarUrl ? "Change profile photo" : "Add profile photo"}
-            </Text>
+            <Text style={styles.listSettingsBtnText}>Settings</Text>
           </Pressable>
-        </View>
-      ) : null}
-      {token && sessionUser && responseUserIsDriver(sessionUser) ? (
-        <View style={styles.driverAvailableRow}>
-          <View style={{ flex: 1, marginRight: 12 }}>
-            <Text style={styles.driverAvailableLabel}>Available for requests</Text>
-            <Text style={styles.driverAvailableHint}>
-              When on, you can receive notifications for new ride requests (stay on duty only when working).
-            </Text>
+        ) : null}
+      </View>
+      <Modal
+        visible={driverSettingsOpen}
+        animationType="slide"
+        onRequestClose={() => setDriverSettingsOpen(false)}
+        {...(Platform.OS === "ios" ? { presentationStyle: "pageSheet" } : {})}
+      >
+        <View style={styles.adminModalRoot}>
+          <View style={styles.adminModalHeader}>
+            <Pressable style={styles.adminModalBack} onPress={() => setDriverSettingsOpen(false)} hitSlop={12}>
+              <Text style={styles.adminModalBackText}>← Back</Text>
+            </Pressable>
+            <Text style={styles.adminModalTitle}>Settings</Text>
+            <View style={styles.adminModalHeaderSpacer} />
           </View>
-          <Switch value={driverAvailable} onValueChange={(v) => void toggleDriverAvailable(v)} />
+          <ScrollView
+            style={styles.adminModalScroll}
+            contentContainerStyle={styles.driverSettingsScrollContent}
+            keyboardShouldPersistTaps="handled"
+            keyboardDismissMode="on-drag"
+          >
+            {token && sessionUser ? (
+              <View style={styles.driverSettingsCard}>
+                <Text style={styles.settingsSectionTitle}>Profile photo</Text>
+                <Text style={styles.settingsSectionHint}>Shown to riders after you accept a trip.</Text>
+                <View style={[styles.profilePhotoRow, styles.settingsProfilePhotoRow]}>
+                  {sessionUser.avatarUrl ? (
+                    <Image source={{ uri: sessionUser.avatarUrl }} style={styles.profilePhotoThumb} />
+                  ) : (
+                    <View style={[styles.profilePhotoThumb, styles.profilePhotoThumbPlaceholder]}>
+                      <Text style={styles.profilePhotoPlaceholderText}>+</Text>
+                    </View>
+                  )}
+                  <Pressable
+                    style={styles.profilePhotoBtn}
+                    onPress={openSignedInAvatarPicker}
+                    disabled={avatarUploadBusy}
+                    accessibilityRole="button"
+                    accessibilityLabel="Update profile photo"
+                  >
+                    <Text style={styles.profilePhotoBtnText}>
+                      {avatarUploadBusy ? "Uploading…" : sessionUser.avatarUrl ? "Change photo" : "Add photo"}
+                    </Text>
+                  </Pressable>
+                </View>
+              </View>
+            ) : null}
+            {token && sessionUser && responseUserIsDriver(sessionUser) ? (
+              <View style={styles.driverSettingsCard}>
+                <Text style={styles.settingsSectionTitle}>Available for requests</Text>
+                <Text style={styles.settingsSectionHint}>
+                  When on, you can receive notifications for new ride requests.
+                </Text>
+                <View style={[styles.driverAvailableRow, styles.settingsAvailabilityRow]}>
+                  <View style={{ flex: 1, marginRight: 12 }}>
+                    <Text style={styles.driverAvailableLabel}>On duty</Text>
+                  </View>
+                  <Switch value={driverAvailable} onValueChange={(v) => void toggleDriverAvailable(v)} />
+                </View>
+              </View>
+            ) : null}
+            {token && sessionUser && responseUserIsDriver(sessionUser) && sessionUser.stripeConnect != null ? (
+              <View style={styles.driverSettingsCard}>
+                <Text style={styles.settingsSectionTitle}>Payouts</Text>
+                <Text style={styles.settingsSectionHint}>Complete this to receive payouts.</Text>
+                {sessionUser.stripeConnect.payoutsEnabled ? (
+                  <Text style={styles.driverPayoutOk}>Ready</Text>
+                ) : sessionUser.stripeConnect.detailsSubmitted ? (
+                  <Text style={styles.driverPayoutPending}>Verifying</Text>
+                ) : (
+                  <Text style={styles.driverPayoutPending}>Setup required</Text>
+                )}
+                <View style={styles.driverPayoutActions}>
+                  {!sessionUser.stripeConnect.payoutsEnabled ? (
+                    <Pressable
+                      style={[styles.driverPayoutPrimaryBtn, stripeConnectBusy && styles.driverPayoutBtnDisabled]}
+                      onPress={() => void openDriverStripeConnect()}
+                      disabled={stripeConnectBusy}
+                    >
+                      <Text style={styles.driverPayoutPrimaryBtnText}>
+                        {stripeConnectBusy ? "Working…" : sessionUser.stripeConnect.detailsSubmitted ? "Continue in Stripe" : "Set up payouts"}
+                      </Text>
+                    </Pressable>
+                  ) : null}
+                  <Pressable
+                    style={[styles.driverPayoutSecondaryBtn, stripeConnectBusy && styles.driverPayoutBtnDisabled]}
+                    onPress={() => void refreshDriverStripeConnect()}
+                    disabled={stripeConnectBusy}
+                  >
+                    <Text style={styles.driverPayoutSecondaryBtnText}>{stripeConnectBusy ? "…" : "Refresh status"}</Text>
+                  </Pressable>
+                </View>
+              </View>
+            ) : null}
+            <Pressable style={styles.driverSettingsLogoutBtn} onPress={() => void logout()}>
+              <Text style={styles.driverSettingsLogoutBtnText}>Log out</Text>
+            </Pressable>
+          </ScrollView>
         </View>
-      ) : null}
+      </Modal>
       {sessionUser?.isAdmin ? (
         <View style={styles.adminEntry}>
           <Pressable style={styles.adminEntryBtn} onPress={() => setRiderAdminOpen(true)}>
@@ -2634,9 +2895,6 @@ export default function App() {
           </View>
         )}
       />
-      <Pressable style={styles.footerBtn} onPress={logout}>
-        <Text style={styles.footerBtnText}>Log out</Text>
-      </Pressable>
       {inAppNavModal}
       {completingTrip ? (
         <View
@@ -2756,6 +3014,23 @@ const styles = StyleSheet.create({
   authModeBtnTextOn: { color: "#5b21b6" },
   regScrollContent: { paddingBottom: 40 },
   regHint: { fontSize: 13, color: "#475569", lineHeight: 19, marginBottom: 12 },
+  regPayoutSuccess: {
+    fontSize: 14,
+    ...pj.sb,
+    color: "#15803d",
+    lineHeight: 20,
+    marginBottom: 12,
+  },
+  regSkipPayoutsBtn: {
+    marginTop: 16,
+    paddingVertical: 14,
+    alignItems: "center",
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: "#cbd5e1",
+    backgroundColor: "#fff",
+  },
+  regSkipPayoutsBtnText: { fontSize: 15, ...pj.sb, color: "#475569" },
   regSectionTitle: { fontSize: 15, ...pj.b, color: "#0f172a", marginTop: 8, marginBottom: 6 },
   regLabel: { fontSize: 12, ...pj.sb, color: "#64748b", marginBottom: 4, marginTop: 8 },
   regInput: {
@@ -2816,6 +3091,24 @@ const styles = StyleSheet.create({
     zIndex: 200,
   },
   listWrap: { flex: 1, paddingTop: 56, paddingHorizontal: 16, backgroundColor: "#f8fafc" },
+  listHeaderRow: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    justifyContent: "space-between",
+    gap: 12,
+    marginBottom: 8,
+  },
+  listHeaderMain: { flex: 1, minWidth: 0 },
+  listSettingsBtn: {
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    backgroundColor: "#fff",
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: "#e2e8f0",
+    alignSelf: "flex-start",
+  },
+  listSettingsBtnText: { fontSize: 14, ...pj.sb, color: "#334155" },
   signedInLine: { fontSize: 13, ...pj.r, color: "#475569", marginBottom: 10 },
   profilePhotoRow: {
     flexDirection: "row",
@@ -2846,7 +3139,50 @@ const styles = StyleSheet.create({
     borderColor: "#e2e8f0",
   },
   driverAvailableLabel: { fontSize: 15, ...pj.sb, color: "#0f172a", marginBottom: 4 },
-  driverAvailableHint: { fontSize: 12, ...pj.r, color: "#64748b", lineHeight: 17 },
+  driverSettingsScrollContent: { padding: 16, paddingBottom: 40 },
+  driverSettingsCard: {
+    backgroundColor: "#fff",
+    borderRadius: 12,
+    padding: 14,
+    marginBottom: 14,
+    borderWidth: 1,
+    borderColor: "#e2e8f0",
+  },
+  settingsSectionTitle: { fontSize: 16, ...pj.b, color: "#0f172a", marginBottom: 6 },
+  settingsSectionHint: { fontSize: 12, ...pj.r, color: "#64748b", lineHeight: 17, marginBottom: 10 },
+  settingsProfilePhotoRow: { marginBottom: 0 },
+  settingsAvailabilityRow: { marginBottom: 0 },
+  driverSettingsLogoutBtn: {
+    marginTop: 4,
+    marginBottom: 8,
+    paddingVertical: 14,
+    alignItems: "center",
+    borderRadius: 12,
+    backgroundColor: "#fff",
+    borderWidth: 1,
+    borderColor: "#fecaca",
+  },
+  driverSettingsLogoutBtnText: { fontSize: 16, ...pj.sb, color: "#b91c1c" },
+  driverPayoutOk: { fontSize: 13, ...pj.sb, color: "#15803d", marginTop: 6, lineHeight: 18 },
+  driverPayoutPending: { fontSize: 13, ...pj.r, color: "#a16207", marginTop: 6, lineHeight: 18 },
+  driverPayoutActions: { flexDirection: "row", flexWrap: "wrap", gap: 10, marginTop: 12 },
+  driverPayoutPrimaryBtn: {
+    backgroundColor: "#5b21b6",
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+    borderRadius: 10,
+  },
+  driverPayoutPrimaryBtnText: { fontSize: 14, ...pj.sb, color: "#fff" },
+  driverPayoutSecondaryBtn: {
+    backgroundColor: "#f1f5f9",
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: "#e2e8f0",
+  },
+  driverPayoutSecondaryBtnText: { fontSize: 14, ...pj.sb, color: "#334155" },
+  driverPayoutBtnDisabled: { opacity: 0.55 },
   adminEntry: { marginBottom: 12 },
   adminEntryBtn: {
     flexDirection: "row",
@@ -2996,7 +3332,7 @@ const styles = StyleSheet.create({
   fareAdjChipText: { fontSize: 13, ...pj.b, color: "#475569" },
   fareAdjChipTextActive: { color: "#fff" },
   fareAdjChipDisabled: { opacity: 0.45 },
-  listTitle: { fontSize: 22, ...pj.b, marginBottom: 8 },
+  listTitle: { fontSize: 22, ...pj.b, marginBottom: 4 },
   refresh: { alignSelf: "flex-start", marginBottom: 12 },
   refreshText: { color: "#059669", ...pj.sb },
   empty: { color: "#64748b", marginTop: 24, fontSize: 14, ...pj.r },
@@ -3043,8 +3379,6 @@ const styles = StyleSheet.create({
     backgroundColor: "#b91c1c",
   },
   btnDisabled: { opacity: 0.6 },
-  footerBtn: { padding: 16, alignItems: "center" },
-  footerBtnText: { color: "#64748b", ...pj.sb },
   overlay: {
     position: "absolute",
     left: 12,

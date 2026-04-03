@@ -161,6 +161,14 @@ export function serializeUserMe(user, driverProfile) {
           };
         }
       }
+      if (typeof driverProfile.appTakePercent === "number" && Number.isFinite(driverProfile.appTakePercent)) {
+        base.appTakePercent = Math.min(100, Math.max(0, Math.round(driverProfile.appTakePercent)));
+      }
+      base.stripeConnect = {
+        payoutsEnabled: Boolean(driverProfile.stripeConnectPayoutsEnabled),
+        detailsSubmitted: Boolean(driverProfile.stripeConnectDetailsSubmitted),
+        needsOnboarding: !Boolean(driverProfile.stripeConnectPayoutsEnabled),
+      };
     }
   }
   return base;
@@ -300,6 +308,19 @@ export function serializeTrip(t, options = {}) {
             ...(t.fareChargeCurrency ? { currency: t.fareChargeCurrency } : {}),
             ...(t.fareChargeError ? { error: t.fareChargeError } : {}),
             ...(t.fareChargeStatus === "requires_action" ? { requiresAction: true } : {}),
+          },
+        }
+      : {}),
+    ...(t.driverPayoutStatus && t.driverPayoutStatus !== "none"
+      ? {
+          driverPayout: {
+            status: t.driverPayoutStatus,
+            ...(t.driverPayoutAppTakeCents != null ? { appTakeCents: t.driverPayoutAppTakeCents } : {}),
+            ...(t.driverPayoutStripeFeeCents != null ? { stripeFeeCents: t.driverPayoutStripeFeeCents } : {}),
+            ...(t.driverPayoutNetCents != null ? { netCents: t.driverPayoutNetCents } : {}),
+            ...(t.driverPayoutTransferId ? { transferId: t.driverPayoutTransferId } : {}),
+            ...(t.driverPayoutError ? { error: t.driverPayoutError } : {}),
+            ...(t.driverPayoutComputedAt ? { computedAt: t.driverPayoutComputedAt.toISOString() } : {}),
           },
         }
       : {}),

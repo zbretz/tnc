@@ -49,6 +49,15 @@ const driverProfileSchema = new mongoose.Schema(
      * Does not affect trip-in-progress alerts.
      */
     availableForRequests: { type: Boolean, default: false },
+
+    /** Platform take from fare only (percent, 0–100). Default 20 → driver keeps 80% of fare before Stripe fee. Tip is not subject to this. */
+    appTakePercent: { type: Number, default: 20 },
+
+    /** Stripe Connect Express / Custom account id (acct_…). Empty until onboarding started. */
+    stripeConnectAccountId: { type: String, default: "", trim: true },
+    /** Cached from Stripe `account.updated` or refresh; payouts blocked until true. */
+    stripeConnectPayoutsEnabled: { type: Boolean, default: false },
+    stripeConnectDetailsSubmitted: { type: Boolean, default: false },
   },
   { timestamps: true }
 );

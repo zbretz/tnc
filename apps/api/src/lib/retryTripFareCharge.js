@@ -4,6 +4,7 @@ import { User } from "../models/User.js";
 import { serializeTripPopulated } from "../serialize.js";
 import { stripeEnabled } from "./stripe.js";
 import { applyFareChargeToTrip } from "./chargeTripFare.js";
+import { processDriverPayoutForTrip } from "./driverPayout.js";
 
 const POPULATE_DRIVER = { path: "driver", select: "-passwordHash" };
 
@@ -53,6 +54,9 @@ export async function riderRetryTripFareCharge(tripId, riderUserId) {
   }
 
   await trip.save();
+  if (trip.fareChargeStatus === "succeeded") {
+    void processDriverPayoutForTrip(trip._id).catch((e) => console.error("[tnc] processDriverPayoutForTrip", e));
+  }
   const fresh = await Trip.findById(id).populate(POPULATE_DRIVER).exec();
   return { ok: true, trip: await serializeTripPopulated(fresh) };
 }

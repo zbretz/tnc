@@ -5,6 +5,7 @@ import { serializeTripPopulated } from "../serialize.js";
 import { clearPickupEtaThrottle } from "../pickupEta.js";
 import { recordTripStatusEvent } from "./tripEvents.js";
 import { applyFareChargeToTrip, maxTipCentsAllowed, resolveTripFareUsd } from "../lib/chargeTripFare.js";
+import { processDriverPayoutForTrip } from "../lib/driverPayout.js";
 
 const POPULATE_DRIVER = { path: "driver", select: "-passwordHash" };
 
@@ -73,6 +74,10 @@ export async function finalizeAwaitingTripCheckout(tripId, opts = {}) {
   trip.etaToDropoff = null;
   clearPickupEtaThrottle(id);
   await trip.save();
+
+  if (trip.fareChargeStatus === "succeeded") {
+    void processDriverPayoutForTrip(trip._id).catch((e) => console.error("[tnc] processDriverPayoutForTrip", e));
+  }
 
   const actorRoles = Array.isArray(opts.actorRoles) ? opts.actorRoles : [];
   await recordTripStatusEvent({

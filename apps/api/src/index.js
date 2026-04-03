@@ -28,6 +28,7 @@ import { initCheckoutAgenda } from "./lib/checkoutAgenda.js";
 import { routesRouter } from "./routes/routes.js";
 import { pricingRouter } from "./routes/pricing.js";
 import { paymentsRouter } from "./routes/payments.js";
+import { stripeWebhookRouter } from "./routes/stripeWebhook.js";
 import { isTwilioOtpConfigured } from "./lib/twilioOtp.js";
 import { notifyDriversNewOpenRequest } from "./lib/expoPush.js";
 
@@ -46,6 +47,7 @@ if (!MONGODB_URI_RAW || String(MONGODB_URI_RAW).trim() === "") {
 
 const app = express();
 app.use(cors({ origin: true, credentials: true }));
+app.use("/webhooks/stripe", express.raw({ type: "application/json" }), stripeWebhookRouter);
 app.use(express.json());
 
 const httpServer = createServer(app);
