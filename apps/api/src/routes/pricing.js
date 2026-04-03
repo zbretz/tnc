@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { authMiddleware, requireRole } from "../middleware/auth.js";
+import { authMiddleware } from "../middleware/auth.js";
 import { computeFareEstimate } from "../fareEstimate.js";
 
 function parseLatLng(obj) {
@@ -13,7 +13,9 @@ function parseLatLng(obj) {
 export const pricingRouter = Router();
 
 /** Body: { pickup: { lat, lng }, dropoff: { lat, lng } } */
-pricingRouter.post("/estimate", authMiddleware, requireRole("rider"), async (req, res) => {
+/** Same auth surface as GET /routes/driving-preview: any signed-in user may preview a fare. */
+pricingRouter.post("/estimate", authMiddleware, async (req, res) => {
+  console.info("[tnc:pricing] POST /estimate");
   const pickup = parseLatLng(req.body?.pickup);
   const dropoff = parseLatLng(req.body?.dropoff);
   if (!pickup || !dropoff) {
@@ -23,8 +25,10 @@ pricingRouter.post("/estimate", authMiddleware, requireRole("rider"), async (req
   try {
     const out = await computeFareEstimate(pickup, dropoff);
     if (!out.ok) {
+      const err = out.error || "estimate_unavailable";
+      console.warn("[tnc:pricing] POST /estimate failed", err);
       res.status(503).json({
-        error: out.error || "estimate_unavailable",
+        error: err,
         estimate: null,
       });
       return;

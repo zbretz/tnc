@@ -482,6 +482,44 @@ async function fetchDrivingPreviewCoords(token, from, to) {
   return null;
 }
 
+async function fetchPricingEstimate(token, pickup, dropoff) {
+  if (!pickup || !dropoff || !token) {
+    return { ok: false, error: "missing" };
+  }
+  const pla = Number(pickup.lat);
+  const plo = Number(pickup.lng);
+  const dla = Number(dropoff.lat);
+  const dlo = Number(dropoff.lng);
+  if (![pla, plo, dla, dlo].every((n) => Number.isFinite(n))) {
+    return { ok: false, error: "invalid_coords" };
+  }
+  try {
+    const data = await api("/pricing/estimate", {
+      method: "POST",
+      token,
+      body: {
+        pickup: { lat: pla, lng: plo },
+        dropoff: { lat: dla, lng: dlo },
+      },
+    });
+    if (data?.estimate != null && typeof data.estimate === "object") {
+      return { ok: true, estimate: data.estimate };
+    }
+    return { ok: false, error: "no_estimate" };
+  } catch (e) {
+    const msg = String(e?.message || e);
+    if (/network request failed/i.test(msg)) {
+      return { ok: false, error: "network" };
+    }
+    const http = msg.match(/\bHTTP (\d{3})\b/);
+    if (http) {
+      return { ok: false, error: `http_${http[1]}` };
+    }
+    const first = msg.split("\n")[0].trim();
+    return { ok: false, error: first.slice(0, 120) || "estimate_unavailable" };
+  }
+}
+
 async function fetchRiderServicePublic() {
   const base = getApiUrl().replace(/\/$/, "");
   const url = `${base}/config/rider`;
@@ -507,7 +545,10 @@ async function fetchRiderServicePublic() {
 
 function formatAddress(parts) {
   if (!parts) return null;
-  const line1 = [parts.name, parts.streetNumber, parts.street].filter(Boolean).join(" ").trim();
+  const name = typeof parts.name === "string" ? parts.name.trim() : "";
+  const streetLine = [parts.streetNumber, parts.street].filter(Boolean).join(" ").trim();
+  /** Expo often sets `name` to the full first address line and also fills street + number — don't join both. */
+  const line1 = name || streetLine;
   const fallback = [parts.city || parts.subregion, parts.region].filter(Boolean).join(", ").trim();
   return line1 || fallback || null;
 }
@@ -1669,58 +1710,38 @@ export default function App() {
   useEffect(() => {
     if (!token || trip) {
       setPlanRouteCoords(null);
+      setFarePreview(null);
       return;
     }
     if (bookingStep !== "dropoff" || !pickup || !dropoff) {
       setPlanRouteCoords(null);
-      return;
-    }
-    if (![pickup.lat, pickup.lng, dropoff.lat, dropoff.lng].every((n) => Number.isFinite(Number(n)))) {
-      setPlanRouteCoords(null);
-      return;
-    }
-    let cancelled = false;
-    (async () => {
-      const coords = await fetchDrivingPreviewCoords(token, pickup, dropoff);
-      if (!cancelled) setPlanRouteCoords(coords);
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [token, trip, bookingStep, pickup?.lat, pickup?.lng, dropoff?.lat, dropoff?.lng]);
-
-  useEffect(() => {
-    if (!token || trip || bookingStep !== "dropoff" || !dropoffBookingCommitted || !pickup || !dropoff) {
       setFarePreview(null);
       return;
     }
     if (![pickup.lat, pickup.lng, dropoff.lat, dropoff.lng].every((n) => Number.isFinite(Number(n)))) {
+      setPlanRouteCoords(null);
       setFarePreview(null);
       return;
     }
     let cancelled = false;
     setFarePreview({ kind: "loading" });
-    const tid = setTimeout(async () => {
-      try {
-        const data = await api("/pricing/estimate", {
-          method: "POST",
-          token,
-          body: {
-            pickup: { lat: Number(pickup.lat), lng: Number(pickup.lng) },
-            dropoff: { lat: Number(dropoff.lat), lng: Number(dropoff.lng) },
-          },
-        });
-        if (!cancelled && data?.estimate) setFarePreview({ kind: "ok", estimate: data.estimate });
-        else if (!cancelled) setFarePreview({ kind: "err" });
-      } catch {
-        if (!cancelled) setFarePreview({ kind: "err" });
+    (async () => {
+      const [coords, pricing] = await Promise.all([
+        fetchDrivingPreviewCoords(token, pickup, dropoff),
+        fetchPricingEstimate(token, pickup, dropoff),
+      ]);
+      if (cancelled) return;
+      setPlanRouteCoords(coords);
+      if (pricing.ok) {
+        setFarePreview({ kind: "ok", estimate: pricing.estimate });
+      } else {
+        setFarePreview({ kind: "err", error: String(pricing.error || "unknown") });
       }
-    }, 550);
+    })();
     return () => {
       cancelled = true;
-      clearTimeout(tid);
     };
-  }, [token, trip, bookingStep, dropoffBookingCommitted, pickup?.lat, pickup?.lng, dropoff?.lat, dropoff?.lng]);
+  }, [token, trip, bookingStep, pickup?.lat, pickup?.lng, dropoff?.lat, dropoff?.lng]);
 
   useEffect(() => {
     if (!token || !trip?.pickup) {
@@ -2046,19 +2067,25 @@ export default function App() {
 
   /** Map path: pin shows dropoff — commit and move to Request ride step. */
   const onPressSelectDropoffFromMap = useCallback(() => {
-    if (!pickup || !dropoff) return;
-    if (![pickup.lat, pickup.lng, dropoff.lat, dropoff.lng].every((n) => Number.isFinite(Number(n)))) return;
+    if (!pickup) return;
+    const r = lastRegionRef.current;
+    if (!r) return;
+    const dLat = Number(r.latitude);
+    const dLng = Number(r.longitude);
+    if (![pickup.lat, pickup.lng, dLat, dLng].every((n) => Number.isFinite(Number(n)))) return;
     Keyboard.dismiss();
     planAddressInputRef.current?.blur?.();
     setPlanAddressFieldFocused(false);
     setAddressPredictions([]);
     setAddressPredictionsLoading(false);
+    setDropoff((prev) => (prev?.lat === dLat && prev?.lng === dLng ? prev : { lat: dLat, lng: dLng }));
+    setDropoffAddressLabel(null);
     if (USE_NATIVE_PLANNING_BOTTOM_SHEET) {
       setPlanningSheetIndex(0);
       planningSheetRef.current?.snapToIndex(clampPlanningSnapIndex(0));
     }
     setDropoffBookingCommitted(true);
-  }, [pickup, dropoff]);
+  }, [pickup]);
 
   /** Tap map while planning: dismiss keyboard, hide suggestions, and optionally advance pickup → dropoff. */
   const onPlanningMapPress = useCallback(() => {
@@ -2546,6 +2573,13 @@ export default function App() {
     !trip &&
     !planningDropoffConfirmed &&
     clampPlanningSnapIndex(planningSheetIndex) === PLANNING_SNAP_MAX_INDEX;
+
+  /**
+   * Pickup / select-dropoff: only allow handle + content drag between snaps while the address field is focused.
+   * Otherwise the sheet stays at the collapsed snap (map-first). Book ride and trip docks keep resize off.
+   */
+  const nativePlanningSheetResizeGesturesEnabled =
+    !trip && !planningDropoffConfirmed && planAddressFieldFocused;
 
   /** Always length 3 — gorhom is unstable when snap count changes; trip mode reuses the same BottomSheet instance. */
   const nativePlanningSheetSnapPoints = useMemo(() => {
@@ -4193,7 +4227,7 @@ export default function App() {
             ref={planningSheetRef}
             index={trip ? 0 : clampPlanningIndexToSnapPoints(planningSheetIndex, nativePlanningSheetSnapPoints.length)}
             snapPoints={nativePlanningSheetSnapPoints}
-            enableContentPanningGesture={!trip}
+            enableContentPanningGesture={nativePlanningSheetResizeGesturesEnabled}
             onChange={(idx) => {
               if (trip) {
                 InteractionManager.runAfterInteractions(() => {
@@ -4206,7 +4240,7 @@ export default function App() {
             enableOverDrag={false}
             enablePanDownToClose={false}
             enableDynamicSizing={false}
-            enableHandlePanningGesture={!trip && !planningDropoffConfirmed}
+            enableHandlePanningGesture={nativePlanningSheetResizeGesturesEnabled}
             keyboardBehavior="interactive"
             keyboardBlurBehavior="restore"
             android_keyboardInputMode="adjustResize"
@@ -5722,6 +5756,15 @@ const styles = StyleSheet.create({
   bookRideOptionPriceBlock: { alignItems: "flex-end", minWidth: 72 },
   bookRideOptionPrice: { fontSize: 17, ...pj.sb, color: "#0f172a" },
   bookRideOptionPriceWas: { fontSize: 11, ...pj.r, color: "#64748b", marginTop: 2 },
+  bookRideFareErrHint: {
+    fontSize: 13,
+    ...pj.r,
+    color: "#b45309",
+    textAlign: "center",
+    marginTop: 8,
+    marginHorizontal: 4,
+    lineHeight: 18,
+  },
   bookRideFooterWhy: { alignSelf: "flex-start", marginLeft: 2, paddingVertical: 2 },
   bookRideFooterWhyText: { fontSize: 13, ...pj.sb, color: "#059669", textDecorationLine: "underline" },
   bookRideCta: {
@@ -5980,13 +6023,33 @@ const styles = StyleSheet.create({
   checkoutConfirmBtnText: { fontSize: 16, ...pj.sb, color: "#ffffff" },
 });
 
+function bookRideTripDurationLine(estimate) {
+  const trip = estimate?.breakdown?.trip;
+  if (!trip || typeof trip !== "object") return null;
+  const text = typeof trip.durationText === "string" ? trip.durationText.trim() : "";
+  if (text) return `~${text} trip`;
+  const min =
+    typeof trip.durationMinutes === "number" && Number.isFinite(trip.durationMinutes)
+      ? Math.max(1, Math.round(trip.durationMinutes))
+      : null;
+  if (min != null) return min <= 1 ? "~1 min trip" : `~${min} min trip`;
+  const sec =
+    typeof trip.durationSeconds === "number" && Number.isFinite(trip.durationSeconds)
+      ? trip.durationSeconds
+      : null;
+  if (sec != null && sec > 0) {
+    const m = Math.max(1, Math.round(sec / 60));
+    return m <= 1 ? "~1 min trip" : `~${m} min trip`;
+  }
+  return null;
+}
+
 function BookRideTravelTimeRow({ styles, farePreview }) {
   let line = "Estimating trip time…";
   if (farePreview?.kind === "ok") {
-    const d = farePreview.estimate?.breakdown?.trip?.durationText;
-    line = d ? `~${d} trip` : "Trip time unavailable";
+    line = bookRideTripDurationLine(farePreview.estimate) || "Trip time unavailable";
   } else if (farePreview?.kind === "err") {
-    line = "Trip time unavailable";
+    line = "Fare & trip time unavailable";
   } else if (farePreview?.kind === "loading") {
     line = "Estimating trip time…";
   } else {
@@ -6000,19 +6063,39 @@ function BookRideTravelTimeRow({ styles, farePreview }) {
   );
 }
 
+function fareEstimateErrHint(errorCode) {
+  if (errorCode == null || typeof errorCode !== "string") return null;
+  const c = errorCode.trim().toLowerCase();
+  if (c === "fare_matrix_key_missing" || c.includes("matrix_key")) {
+    return "Fare needs a Google Distance Matrix key on the server (see API env).";
+  }
+  if (c === "network") {
+    return "Couldn’t reach the server. Check your connection and API URL.";
+  }
+  if (c === "http_403" || c === "forbidden") {
+    return "Not allowed to load fares for this account. Check you are signed in.";
+  }
+  if (c === "estimate_unavailable" || c.startsWith("http_")) {
+    return "Couldn’t price this route. Try again or adjust pickup/dropoff.";
+  }
+  return null;
+}
+
 function BookRideFooter({ styles, farePreview, busy, onRequestRide, onPressWhyFree }) {
   const productMeta = "Up to 4 passengers";
 
   let priceLine = "…";
   let priceWas = null;
   let showWhyFree = false;
+  const errHint = farePreview?.kind === "err" ? fareEstimateErrHint(farePreview.error) : null;
 
   if (farePreview?.kind === "loading") {
     priceLine = "…";
   } else if (farePreview?.kind === "ok") {
     const e = farePreview.estimate;
     if (e && typeof e === "object") {
-      const cur = e.currency === "USD" ? "$" : "";
+      const ccy = String(e.currency || "USD").toUpperCase();
+      const cur = ccy === "USD" ? "$" : `${ccy} `;
       if (e.breakdown?.fareFree) {
         priceLine = `${cur}0.00`;
         if (typeof e.breakdown?.waivedQuoteUsd === "number") {
@@ -6020,9 +6103,9 @@ function BookRideFooter({ styles, farePreview, busy, onRequestRide, onPressWhyFr
         }
         showWhyFree = true;
       } else {
-        const t = e.total;
-        priceLine =
-          typeof t === "number" && Number.isFinite(t) ? `${cur}${t.toFixed(2)}` : "—";
+        const raw = e.total;
+        const t = typeof raw === "number" ? raw : Number(raw);
+        priceLine = Number.isFinite(t) ? `${cur}${t.toFixed(2)}` : "—";
       }
     } else {
       priceLine = "—";
@@ -6052,6 +6135,11 @@ function BookRideFooter({ styles, farePreview, busy, onRequestRide, onPressWhyFr
           {priceWas ? <Text style={styles.bookRideOptionPriceWas}>{priceWas}</Text> : null}
         </View>
       </View>
+      {errHint ? (
+        <Text style={styles.bookRideFareErrHint} accessibilityRole="text">
+          {errHint}
+        </Text>
+      ) : null}
       {showWhyFree ? (
         <Pressable style={styles.bookRideFooterWhy} onPress={onPressWhyFree} hitSlop={8}>
           <Text style={styles.bookRideFooterWhyText}>Why is this free?</Text>

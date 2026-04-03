@@ -1,4 +1,5 @@
 import { getDrivingDurationToDestination } from "./googleDistance.js";
+import { distanceMatrixApiKey } from "./lib/mapsKeys.js";
 
 const MIN_INTERVAL_MS = Number(process.env.TNC_ETA_MIN_INTERVAL_MS) || 28000;
 const MIN_MOVE_METERS = Number(process.env.TNC_ETA_MIN_MOVE_METERS) || 250;
@@ -97,8 +98,7 @@ export async function tryRefreshPickupEta(trip, driverLat, driverLng) {
     return { refreshed: false, skipped: `throttle:${gate.reason}` };
   }
 
-  const apiKey =
-    process.env.GOOGLE_DISTANCE_MATRIX_API_KEY || process.env.GOOGLE_MAPS_SERVER_API_KEY || "";
+  const apiKey = distanceMatrixApiKey();
   const t0 = Date.now();
   const result = await getDrivingDurationToDestination(
     { lat: Number(driverLat), lng: Number(driverLng) },

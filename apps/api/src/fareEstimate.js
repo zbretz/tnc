@@ -1,4 +1,5 @@
 import { getDrivingDurationToDestination, getDrivingDurationsOneToMany } from "./googleDistance.js";
+import { distanceMatrixApiKey } from "./lib/mapsKeys.js";
 import { getFareQuoteModifiers } from "./models/AppSettings.js";
 import { loadPricingAnchors } from "./pricingAnchors.js";
 
@@ -12,12 +13,6 @@ function numEnv(name, fallback) {
   if (v == null || v === "") return fallback;
   const n = Number(v);
   return Number.isFinite(n) ? n : fallback;
-}
-
-function matrixApiKey() {
-  return (
-    process.env.GOOGLE_DISTANCE_MATRIX_API_KEY || process.env.GOOGLE_MAPS_SERVER_API_KEY || ""
-  ).trim();
 }
 
 /** Trip-time component: $15 at 10 min, $30 at 22 min; min fare floor; linear extrapolation beyond 22. */
@@ -42,12 +37,16 @@ function anchorExcessUsd(excessMinutes) {
  * @returns {Promise<{ ok: true, estimate: object } | { ok: false, error: string }>}
  */
 export async function computeFareEstimate(pickup, dropoff) {
-  const apiKey = matrixApiKey();
+  const apiKey = distanceMatrixApiKey();
   const anchors = loadPricingAnchors();
   if (!pickup || !dropoff) {
     return { ok: false, error: "pickup and dropoff required" };
   }
   if (!apiKey) {
+    fareLog("skip", {
+      reason: "fare_matrix_key_missing",
+      hint: "Set GOOGLE_DISTANCE_MATRIX_API_KEY or GOOGLE_MAPS_SERVER_API_KEY, or reuse GOOGLE_DIRECTIONS_API_KEY with Distance Matrix API enabled on that key.",
+    });
     return { ok: false, error: "fare_matrix_key_missing" };
   }
 
