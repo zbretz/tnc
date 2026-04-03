@@ -8,6 +8,11 @@ const expo = new Expo({
 
 const ANDROID_CHANNEL_ID = "trips";
 
+function isPushConfigured() {
+  // expo-server-sdk sends without EXPO_ACCESS_TOKEN unless your Expo project requires it.
+  return true;
+}
+
 /**
  * @param {string[]} tokens
  * @param {(to: string) => object} buildExtras - returns { title, body, data }

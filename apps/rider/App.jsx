@@ -2325,8 +2325,9 @@ export default function App() {
           setBusy(false);
           if (__DEV__) console.warn("[tnc rider] requestRide: setTrip dispatched");
           if (!pushPromptAfterFirstBookRef.current) {
-            pushPromptAfterFirstBookRef.current = true;
-            void registerExpoPushWithApi({ api, authToken: token }).catch(() => {});
+            void registerExpoPushWithApi({ api, authToken: token }).then((r) => {
+              if (r?.ok) pushPromptAfterFirstBookRef.current = true;
+            });
           }
         });
       });

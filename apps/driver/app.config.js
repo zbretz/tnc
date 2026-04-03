@@ -6,8 +6,18 @@ const googleMapsApiKey =
     ? process.env.GOOGLE_MAPS_API_KEY.trim()
     : undefined;
 
+/**
+ * EAS / expo-notifications. Override with EXPO_PUBLIC_EAS_PROJECT_ID_DRIVER (or EXPO_PUBLIC_EAS_PROJECT_ID) in root `.env`.
+ */
+const easProjectIdDriver =
+  (typeof process.env.EXPO_PUBLIC_EAS_PROJECT_ID_DRIVER === "string" &&
+    process.env.EXPO_PUBLIC_EAS_PROJECT_ID_DRIVER.trim()) ||
+  (typeof process.env.EXPO_PUBLIC_EAS_PROJECT_ID === "string" && process.env.EXPO_PUBLIC_EAS_PROJECT_ID.trim()) ||
+  "b65f0b10-6fe0-45c9-b20a-2ecf67ab170c";
+
 /** @type {import('expo/config').ExpoConfig} */
 module.exports = {
+  owner: "zbretz",
   name: "TNC Driver",
   slug: "tnc-driver",
   version: "1.0.0",
@@ -24,6 +34,10 @@ module.exports = {
   ios: {
     bundleIdentifier: "com.tnc.driver",
     supportsTablet: true,
+    /** Required for remote push; must match provisioning (dev client / debug → development). */
+    entitlements: {
+      "aps-environment": "development",
+    },
     infoPlist: {
       NSPhotoLibraryUsageDescription: "Choose a photo for your driver profile picture.",
       NSCameraUsageDescription: "Take a photo for your driver profile picture.",
@@ -96,10 +110,6 @@ module.exports = {
   ],
   extra: {
     apiUrl: process.env.EXPO_PUBLIC_API_URL || "http://10.0.0.135:3000",
-    ...(process.env.EXPO_PUBLIC_EAS_PROJECT_ID_DRIVER?.trim()
-      ? { eas: { projectId: process.env.EXPO_PUBLIC_EAS_PROJECT_ID_DRIVER.trim() } }
-      : process.env.EXPO_PUBLIC_EAS_PROJECT_ID?.trim()
-        ? { eas: { projectId: process.env.EXPO_PUBLIC_EAS_PROJECT_ID.trim() } }
-        : {}),
+    eas: { projectId: easProjectIdDriver },
   },
 };

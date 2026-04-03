@@ -12,8 +12,17 @@ const stripePublishableKey =
     ? process.env.EXPO_PUBLIC_STRIPE_PUBLISHABLE_KEY.trim()
     : "";
 
+/**
+ * EAS / expo-notifications. Override with EXPO_PUBLIC_EAS_PROJECT_ID in root `.env`.
+ * Project id and slug are fixed per Expo project (https://expo.fyi/eas-project-id).
+ */
+const easProjectId =
+  (typeof process.env.EXPO_PUBLIC_EAS_PROJECT_ID === "string" && process.env.EXPO_PUBLIC_EAS_PROJECT_ID.trim()) ||
+  "f9b2e30e-7fa3-49f1-8719-2754efa9aa09";
+
 /** @type {import('expo/config').ExpoConfig} */
 module.exports = {
+  owner: "zbretz",
   name: "TNC Rider",
   slug: "tnc-rider",
   scheme: "tnc-rider",
@@ -29,8 +38,12 @@ module.exports = {
     backgroundColor: "#ffffff",
   },
   ios: {
+    deploymentTarget: "16.0",
     bundleIdentifier: "com.tnc.rider",
     supportsTablet: true,
+    entitlements: {
+      "aps-environment": "development",
+    },
     infoPlist: {
       NSLocationWhenInUseUsageDescription:
         "We use your location to set pickup and show the driver approaching.",
@@ -87,8 +100,6 @@ module.exports = {
     apiUrl: process.env.EXPO_PUBLIC_API_URL || "http://10.0.0.135:3000",
     googleGeocodingApiKey: process.env.EXPO_PUBLIC_GOOGLE_GEOCODING_API_KEY || "",
     stripePublishableKey,
-    ...(process.env.EXPO_PUBLIC_EAS_PROJECT_ID?.trim()
-      ? { eas: { projectId: process.env.EXPO_PUBLIC_EAS_PROJECT_ID.trim() } }
-      : {}),
+    eas: { projectId: easProjectId },
   },
 };

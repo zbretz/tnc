@@ -418,7 +418,6 @@ export default function App() {
   /** Optional data URL sent with complete-driver-profile. */
   const [regAvatarUrl, setRegAvatarUrl] = useState(null);
   const [avatarUploadBusy, setAvatarUploadBusy] = useState(false);
-  const driverPushRegisteredRef = useRef(false);
   const [driverAvailable, setDriverAvailable] = useState(false);
 
   const retryApiHealth = useCallback(() => {
@@ -697,15 +696,25 @@ export default function App() {
     }
   }, [sessionUser?.availableForRequests]);
 
+  const driverIdForPush = useMemo(() => {
+    if (!sessionUser || !responseUserIsDriver(sessionUser)) return "";
+    const id = sessionUser._id ?? sessionUser.id;
+    return id != null && id !== "" ? String(id) : "";
+  }, [sessionUser]);
+
+  /** Re-run when JWT or driver identity changes; do not gate on a ref set before async work (failed first attempt used to block forever). */
   useEffect(() => {
-    if (!token || !sessionUser || !responseUserIsDriver(sessionUser)) {
-      driverPushRegisteredRef.current = false;
-      return;
-    }
-    if (driverPushRegisteredRef.current) return;
-    driverPushRegisteredRef.current = true;
-    void registerExpoPushWithApi({ api, authToken: token }).catch(() => {});
-  }, [token, sessionUser]);
+    if (!token || !driverIdForPush) return;
+    let cancelled = false;
+    void registerExpoPushWithApi({ api, authToken: token }).then((r) => {
+      if (!cancelled && !r?.ok && __DEV__) {
+        console.warn("[tnc driver push] registerExpoPushWithApi", r?.reason || r);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [token, driverIdForPush]);
 
   const toggleDriverAvailable = useCallback(
     async (v) => {
