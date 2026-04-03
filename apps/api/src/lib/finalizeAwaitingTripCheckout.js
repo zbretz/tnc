@@ -1,7 +1,7 @@
 import mongoose from "mongoose";
 import { Trip } from "../models/Trip.js";
 import { User } from "../models/User.js";
-import { serializeTrip } from "../serialize.js";
+import { serializeTripPopulated } from "../serialize.js";
 import { clearPickupEtaThrottle } from "../pickupEta.js";
 import { recordTripStatusEvent } from "./tripEvents.js";
 import { applyFareChargeToTrip, maxTipCentsAllowed, resolveTripFareUsd } from "../lib/chargeTripFare.js";
@@ -86,5 +86,5 @@ export async function finalizeAwaitingTripCheckout(tripId, opts = {}) {
   }).catch((e) => console.error("[tnc] TripEvent finalize checkout", e));
 
   const fresh = await Trip.findById(id).populate(POPULATE_DRIVER).exec();
-  return { ok: true, trip: serializeTrip(fresh) };
+  return { ok: true, trip: await serializeTripPopulated(fresh) };
 }

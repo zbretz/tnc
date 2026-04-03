@@ -39,7 +39,10 @@ const userSchema = new mongoose.Schema(
     lastName: { type: String, default: "", trim: true },
     /** Driver profile image (MVP: URL or small data URL). */
     avatarUrl: { type: String, default: "" },
-    /** Legacy embedded vehicle; prefer DriverProfile.vehicle when present. */
+    /**
+     * Denormalized copy of driver vehicle for drivers with a DriverProfile.
+     * Canonical source: DriverProfile.vehicle (API PATCH merges into profile, then mirrors here).
+     */
     vehicle: { type: vehicleSchema, default: () => ({}) },
     /** Primary ops driver (seed: driver1@tnc.local). Can toggle rider availability and see rider phones on requests. */
     isAdmin: { type: Boolean, default: false },

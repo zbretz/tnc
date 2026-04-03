@@ -1,13 +1,13 @@
 import mongoose from "mongoose";
 import { Trip } from "../models/Trip.js";
 import { getStripe, stripeEnabled } from "./stripe.js";
-import { serializeTrip } from "../serialize.js";
+import { serializeTripPopulated } from "../serialize.js";
 
 const POPULATE_DRIVER = { path: "driver", select: "-passwordHash" };
 
 async function loadSerialized(id) {
   const t = await Trip.findById(id).populate(POPULATE_DRIVER).exec();
-  return t ? serializeTrip(t) : null;
+  return t ? await serializeTripPopulated(t) : null;
 }
 
 /**

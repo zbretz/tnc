@@ -1,5 +1,54 @@
+import { DriverProfile } from "./models/DriverProfile.js";
+
 function trimOrEmpty(s) {
   return typeof s === "string" ? s.trim() : "";
+}
+
+/** Normalize mongoose subdoc or plain object to trimmed string fields (+ optional year). */
+function rawVehicleToPlain(v) {
+  if (!v || typeof v !== "object") {
+    return { make: "", model: "", color: "", licensePlate: "", photoUrl: "" };
+  }
+  const vy = v.year;
+  const year =
+    vy != null && Number.isFinite(Number(vy)) ? Math.round(Number(vy)) : undefined;
+  return {
+    make: trimOrEmpty(v.make),
+    model: trimOrEmpty(v.model),
+    color: trimOrEmpty(v.color),
+    licensePlate: trimOrEmpty(v.licensePlate),
+    photoUrl: trimOrEmpty(v.photoUrl),
+    ...(year !== undefined ? { year } : {}),
+  };
+}
+
+/**
+ * Canonical driver vehicle for API output: DriverProfile.vehicle wins when set;
+ * User.vehicle fills gaps (legacy / backfill).
+ */
+export function resolvedDriverVehicle(user, driverProfile) {
+  const u = rawVehicleToPlain(user?.vehicle);
+  const p = rawVehicleToPlain(driverProfile?.vehicle);
+  const mergeStr = (key) => {
+    const pv = p[key];
+    if (typeof pv === "string" && pv.length > 0) return pv;
+    const uv = u[key];
+    return typeof uv === "string" ? uv : "";
+  };
+  const year =
+    p.year !== undefined
+      ? p.year
+      : u.year !== undefined
+        ? u.year
+        : undefined;
+  return {
+    make: mergeStr("make"),
+    model: mergeStr("model"),
+    color: mergeStr("color"),
+    licensePlate: mergeStr("licensePlate"),
+    photoUrl: mergeStr("photoUrl"),
+    ...(year !== undefined ? { year } : {}),
+  };
 }
 
 function lastInitialFrom(lastName, fallbackName) {
@@ -19,22 +68,25 @@ function userIsDriver(user) {
   return Array.isArray(user.roles) && user.roles.includes("driver");
 }
 
-/** Rider-facing driver card (no private fields). */
-export function serializeDriverPublic(user) {
+/**
+ * Rider-facing driver card (no private fields).
+ * @param {object} [driverProfile] — lean or doc; vehicle merged via {@link resolvedDriverVehicle}.
+ */
+export function serializeDriverPublic(user, driverProfile) {
   if (!userIsDriver(user)) return undefined;
   const firstFromName = trimOrEmpty(user.name).split(/\s+/)[0] || "";
   const firstName = trimOrEmpty(user.firstName) || firstFromName || "Driver";
   const lastInitial = lastInitialFrom(user.lastName, user.name);
-  const v = user.vehicle && typeof user.vehicle === "object" ? user.vehicle : {};
-  const vy = v.year;
+  const merged = resolvedDriverVehicle(user, driverProfile);
+  const vy = merged.year;
   const year = vy != null && Number.isFinite(Number(vy)) ? Math.round(Number(vy)) : undefined;
   const vehicle = {
-    ...(trimOrEmpty(v.make) ? { make: trimOrEmpty(v.make) } : {}),
-    ...(trimOrEmpty(v.model) ? { model: trimOrEmpty(v.model) } : {}),
+    ...(trimOrEmpty(merged.make) ? { make: trimOrEmpty(merged.make) } : {}),
+    ...(trimOrEmpty(merged.model) ? { model: trimOrEmpty(merged.model) } : {}),
     ...(year !== undefined ? { year } : {}),
-    ...(trimOrEmpty(v.color) ? { color: trimOrEmpty(v.color) } : {}),
-    ...(trimOrEmpty(v.licensePlate) ? { licensePlate: trimOrEmpty(v.licensePlate) } : {}),
-    ...(trimOrEmpty(v.photoUrl) ? { photoUrl: trimOrEmpty(v.photoUrl) } : {}),
+    ...(trimOrEmpty(merged.color) ? { color: trimOrEmpty(merged.color) } : {}),
+    ...(trimOrEmpty(merged.licensePlate) ? { licensePlate: trimOrEmpty(merged.licensePlate) } : {}),
+    ...(trimOrEmpty(merged.photoUrl) ? { photoUrl: trimOrEmpty(merged.photoUrl) } : {}),
   };
   return {
     firstName,
@@ -53,7 +105,8 @@ export function serializeUserMe(user, driverProfile) {
       : user.role
         ? [user.role]
         : ["rider"];
-  const vy = user.vehicle?.year;
+  const vMe = userIsDriver(user) ? resolvedDriverVehicle(user, driverProfile) : rawVehicleToPlain(user?.vehicle);
+  const vy = vMe.year;
   const year =
     vy != null && Number.isFinite(Number(vy)) ? Math.round(Number(vy)) : undefined;
   const base = {
@@ -68,22 +121,19 @@ export function serializeUserMe(user, driverProfile) {
     firstName: trimOrEmpty(user.firstName),
     lastName: trimOrEmpty(user.lastName),
     avatarUrl: trimOrEmpty(user.avatarUrl),
-    vehicle:
-      user.vehicle && typeof user.vehicle === "object"
-        ? {
-            make: trimOrEmpty(user.vehicle.make),
-            model: trimOrEmpty(user.vehicle.model),
-            ...(year !== undefined ? { year } : {}),
-            color: trimOrEmpty(user.vehicle.color),
-            licensePlate: trimOrEmpty(user.vehicle.licensePlate),
-            photoUrl: trimOrEmpty(user.vehicle.photoUrl),
-          }
-        : {},
+    vehicle: {
+      make: trimOrEmpty(vMe.make),
+      model: trimOrEmpty(vMe.model),
+      ...(year !== undefined ? { year } : {}),
+      color: trimOrEmpty(vMe.color),
+      licensePlate: trimOrEmpty(vMe.licensePlate),
+      photoUrl: trimOrEmpty(vMe.photoUrl),
+    },
     createdAt: user.createdAt?.toISOString?.(),
     updatedAt: user.updatedAt?.toISOString?.(),
   };
   if (userIsDriver(user)) {
-    base.driverPublic = serializeDriverPublic(user);
+    base.driverPublic = serializeDriverPublic(user, driverProfile);
     if (driverProfile && typeof driverProfile === "object") {
       base.availableForRequests = Boolean(driverProfile.availableForRequests);
       base.driverStatus = driverProfile.driverStatus || "pending";
@@ -144,7 +194,9 @@ function pickLatLng(p) {
 export function serializeTrip(t, options = {}) {
   const pickup = pickLatLng(t.pickup);
   const dropoff = pickLatLng(t.dropoff);
-  const driverProfile = isPopulatedDriver(t.driver) ? serializeDriverPublic(t.driver) : undefined;
+  const driverProfilePayload = isPopulatedDriver(t.driver)
+    ? serializeDriverPublic(t.driver, options.driverProfile)
+    : undefined;
   const riderPhoneRaw = options.riderPhone;
   const riderPhone =
     typeof riderPhoneRaw === "string" && riderPhoneRaw.trim() ? riderPhoneRaw.trim() : undefined;
@@ -152,7 +204,7 @@ export function serializeTrip(t, options = {}) {
     _id: String(t._id),
     riderId: riderIdFromTripDoc(t),
     driverId: driverIdFromTrip(t),
-    ...(driverProfile ? { driverProfile } : {}),
+    ...(driverProfilePayload ? { driverProfile: driverProfilePayload } : {}),
     pickup: pickup ?? t.pickup,
     ...(t.pickupAddress ? { pickupAddress: t.pickupAddress } : {}),
     ...(dropoff ? { dropoff } : {}),
@@ -254,4 +306,17 @@ export function serializeTrip(t, options = {}) {
     createdAt: t.createdAt.toISOString(),
     updatedAt: t.updatedAt.toISOString(),
   };
+}
+
+/**
+ * Same as {@link serializeTrip} but loads {@link DriverProfile} when `driver` is populated
+ * so `driverProfile.vehicle` reflects canonical profile data.
+ */
+export async function serializeTripPopulated(trip, options = {}) {
+  if (!trip) return null;
+  let dp = options.driverProfile;
+  if (dp === undefined && isPopulatedDriver(trip.driver)) {
+    dp = await DriverProfile.findOne({ userId: trip.driver._id }).lean().exec();
+  }
+  return serializeTrip(trip, { ...options, driverProfile: dp });
 }

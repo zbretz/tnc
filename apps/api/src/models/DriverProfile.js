@@ -31,6 +31,7 @@ const driverProfileSchema = new mongoose.Schema(
       default: "pending",
       index: true,
     },
+    /** Canonical vehicle for this driver (PATCH /auth/me merges here; User.vehicle is mirrored). */
     vehicle: { type: vehicleSchema, default: () => ({}) },
     license: { type: licenseSchema, default: () => ({}) },
     avatarUrl: { type: String, default: "" },

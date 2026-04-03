@@ -1,7 +1,7 @@
 import mongoose from "mongoose";
 import { Trip } from "../models/Trip.js";
 import { User } from "../models/User.js";
-import { serializeTrip } from "../serialize.js";
+import { serializeTripPopulated } from "../serialize.js";
 import { stripeEnabled } from "./stripe.js";
 import { applyFareChargeToTrip } from "./chargeTripFare.js";
 
@@ -54,5 +54,5 @@ export async function riderRetryTripFareCharge(tripId, riderUserId) {
 
   await trip.save();
   const fresh = await Trip.findById(id).populate(POPULATE_DRIVER).exec();
-  return { ok: true, trip: serializeTrip(fresh) };
+  return { ok: true, trip: await serializeTripPopulated(fresh) };
 }

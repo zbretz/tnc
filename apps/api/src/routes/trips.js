@@ -4,7 +4,7 @@ import { Trip } from "../models/Trip.js";
 import { User, rolesFromUserDoc } from "../models/User.js";
 import { DriverProfile } from "../models/DriverProfile.js";
 import { authMiddleware, requireRole } from "../middleware/auth.js";
-import { serializeTrip } from "../serialize.js";
+import { serializeTrip, serializeTripPopulated } from "../serialize.js";
 import { clearPickupEtaThrottle, tryRefreshPickupEta } from "../pickupEta.js";
 import { getRiderServiceConfig } from "../models/AppSettings.js";
 import { computeFareEstimate } from "../fareEstimate.js";
@@ -32,7 +32,7 @@ const POPULATE_DRIVER = { path: "driver", select: "-passwordHash" };
 
 async function loadTripSerialized(id) {
   const t = await Trip.findById(id).populate(POPULATE_DRIVER).exec();
-  return t ? serializeTrip(t) : null;
+  return t ? await serializeTripPopulated(t) : null;
 }
 
 /** Coerce JSON numbers that may arrive as strings; return null if invalid. */
@@ -95,7 +95,7 @@ export function createTripsRouter(deps) {
         res.status(403).json({ error: "Forbidden" });
         return;
       }
-      res.json({ trip: serializeTrip(trip) });
+      res.json({ trip: await serializeTripPopulated(trip) });
       return;
     }
     if (trip.status === "requested") {
@@ -318,7 +318,7 @@ export function createTripsRouter(deps) {
         : {},
     }).catch((e) => console.error("[tnc] TripEvent accept", e));
     const populated = await Trip.findById(updated._id).populate(POPULATE_DRIVER).exec();
-    const out = serializeTrip(populated);
+    const out = await serializeTripPopulated(populated);
     deps.onTripUpdated(out);
     void notifyRiderDriverAccepted(out);
     res.json({ trip: out });
@@ -752,7 +752,7 @@ export function createTripsRouter(deps) {
       res.status(403).json({ error: "Forbidden" });
       return;
     }
-    res.json({ trip: serializeTrip(trip) });
+    res.json({ trip: await serializeTripPopulated(trip) });
   });
 
   return r;

@@ -15,7 +15,7 @@ import { DriverProfile } from "./models/DriverProfile.js";
 import { authRouter } from "./routes/auth.js";
 import { createTripsRouter } from "./routes/trips.js";
 import { verifyToken } from "./middleware/auth.js";
-import { serializeTrip } from "./serialize.js";
+import { serializeTripPopulated } from "./serialize.js";
 import { tryRefreshPickupEta } from "./pickupEta.js";
 import { seedDevDriversIfNeeded } from "./seedDevDrivers.js";
 import {
@@ -176,7 +176,7 @@ io.on("connection", (socket) => {
     const fresh = await Trip.findById(tripId)
       .populate({ path: "driver", select: "-passwordHash" })
       .exec();
-    const serialized = fresh ? serializeTrip(fresh) : serializeTrip(trip);
+    const serialized = await (fresh ? serializeTripPopulated(fresh) : serializeTripPopulated(trip));
     emitTripRoom(tripId, "driver:location", {
       lat,
       lng,

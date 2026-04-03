@@ -13,7 +13,7 @@ import {
   verifyDriverOtpSignupToken,
   verifyRiderSignupToken,
 } from "../middleware/auth.js";
-import { serializeUserMe } from "../serialize.js";
+import { serializeUserMe, resolvedDriverVehicle } from "../serialize.js";
 import { normalizePhoneE164 } from "../lib/phone.js";
 import { DEV_SEED_DRIVER_EMAILS, DEV_SEED_DRIVER_EMAIL_SET } from "../seedDevDrivers.js";
 import { createAvatarPresignedPut, isAvatarS3Configured } from "../lib/s3AvatarPresign.js";
@@ -437,6 +437,11 @@ r.get("/dev/drivers", async (req, res) => {
     .sort({ email: 1 })
     .lean()
     .exec();
+  const driverIds = drivers.map((d) => d._id);
+  const profiles = await DriverProfile.find({ userId: { $in: driverIds } })
+    .lean()
+    .exec();
+  const profByUserId = new Map(profiles.map((p) => [String(p.userId), p]));
   res.json({
     drivers: drivers.map((d) => {
       const nameT = typeof d.name === "string" ? d.name.trim() : "";
@@ -444,8 +449,9 @@ r.get("/dev/drivers", async (req, res) => {
       const first = (typeof d.firstName === "string" ? d.firstName.trim() : "") || firstFromName || "Driver";
       const lastRaw = typeof d.lastName === "string" ? d.lastName.trim() : "";
       const lastI = lastRaw[0] ? `${lastRaw[0].toUpperCase()}.` : "";
-      const v = d.vehicle && typeof d.vehicle === "object" ? d.vehicle : {};
-      const vehLabel = [v.color, v.make, v.model].filter((x) => typeof x === "string" && x.trim()).join(" ");
+      const prof = profByUserId.get(String(d._id));
+      const merged = resolvedDriverVehicle(d, prof);
+      const vehLabel = [merged.color, merged.make, merged.model].filter((x) => typeof x === "string" && x.trim()).join(" ");
       const label = [first, lastI].filter(Boolean).join(" ");
       return {
         id: String(d._id),
@@ -631,6 +637,9 @@ r.patch("/me", authMiddleware, async (req, res) => {
     user.name = t;
   }
   const isDriver = user.role === "driver" || (Array.isArray(user.roles) && user.roles.includes("driver"));
+  const driverProf = isDriver ? await DriverProfile.findOne({ userId: user._id }).exec() : null;
+  let saveDriverProfile = false;
+
   if (isDriver) {
     if (firstName != null) user.firstName = String(firstName).trim().slice(0, 80);
     if (lastName != null) user.lastName = String(lastName).trim().slice(0, 80);
@@ -646,6 +655,7 @@ r.patch("/me", authMiddleware, async (req, res) => {
         return;
       }
       user.avatarUrl = av;
+      if (driverProf) saveDriverProfile = true;
     }
     if (vehicleRaw !== undefined) {
       const veh = parseVehicleBody(vehicleRaw);
@@ -653,8 +663,25 @@ r.patch("/me", authMiddleware, async (req, res) => {
         res.status(400).json({ error: "vehicle photoUrl exceeds maximum length" });
         return;
       }
-      const prev = user.vehicle?.toObject?.() ?? user.vehicle ?? {};
-      user.vehicle = { ...prev, ...veh };
+      if (driverProf) {
+        const prev = driverProf.vehicle?.toObject?.() ?? driverProf.vehicle ?? {};
+        const next = { ...prev, ...veh };
+        driverProf.vehicle = {
+          make: next.make || "",
+          model: next.model || "",
+          ...(next.year != null && Number.isFinite(Number(next.year))
+            ? { year: Math.round(Number(next.year)) }
+            : {}),
+          color: next.color || "",
+          licensePlate: next.licensePlate || "",
+          photoUrl: next.photoUrl || "",
+        };
+        user.vehicle = { ...(driverProf.vehicle.toObject?.() ?? driverProf.vehicle) };
+        saveDriverProfile = true;
+      } else {
+        const prev = user.vehicle?.toObject?.() ?? user.vehicle ?? {};
+        user.vehicle = { ...prev, ...veh };
+      }
     }
     if (req.body?.availableForRequests !== undefined) {
       const v = req.body.availableForRequests;
@@ -680,21 +707,11 @@ r.patch("/me", authMiddleware, async (req, res) => {
     user.phone = p;
   }
   await user.save();
-  if (isDriver && (vehicleRaw !== undefined || avatarIn !== undefined)) {
-    const prof = await DriverProfile.findOne({ userId: user._id }).exec();
-    if (prof) {
-      const uv = user.vehicle?.toObject?.() ?? user.vehicle ?? {};
-      prof.vehicle = {
-        make: uv.make || "",
-        model: uv.model || "",
-        ...(uv.year != null && Number.isFinite(Number(uv.year)) ? { year: Math.round(Number(uv.year)) } : {}),
-        color: uv.color || "",
-        licensePlate: uv.licensePlate || "",
-        photoUrl: uv.photoUrl || "",
-      };
-      if (avatarIn !== undefined) prof.avatarUrl = user.avatarUrl || "";
-      await prof.save().catch((e) => console.error("[tnc] DriverProfile sync from PATCH /me", e));
+  if (driverProf && saveDriverProfile) {
+    if (avatarIn !== undefined) {
+      driverProf.avatarUrl = user.avatarUrl || "";
     }
+    await driverProf.save().catch((e) => console.error("[tnc] DriverProfile sync from PATCH /me", e));
   }
   const fresh = await User.findById(user._id).select("-passwordHash").exec();
   res.json({ user: await serializeUserMeForAuth(fresh) });
