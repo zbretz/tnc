@@ -393,6 +393,24 @@ const RIDER_TRIP_MAP_STATUSES = ["requested", "accepted", "in_progress", "awaiti
 /** Dropoff-leg map routing (driver toward destination). */
 const RIDER_TRIP_DROPOFF_LEG = ["in_progress", "awaiting_rider_checkout"];
 
+/** Same rules as API `riderMayInitiateCancelInApp` — no cancel during checkout or after 5 min in progress. */
+const RIDER_IN_PROGRESS_CANCEL_GRACE_MS = 5 * 60 * 1000;
+
+function riderCanCancelTripInApp(trip) {
+  if (!trip) return false;
+  const st = trip.status;
+  if (st === "completed" || st === "cancelled") return false;
+  if (st === "awaiting_rider_checkout") return false;
+  if (st === "in_progress") {
+    const raw = trip.rideInProgressAt;
+    if (raw == null) return true;
+    const ms = new Date(raw).getTime();
+    if (!Number.isFinite(ms)) return true;
+    if (Date.now() - ms > RIDER_IN_PROGRESS_CANCEL_GRACE_MS) return false;
+  }
+  return true;
+}
+
 function stripUndefined(obj) {
   if (obj == null || typeof obj !== "object" || Array.isArray(obj)) return obj;
   return Object.fromEntries(Object.entries(obj).filter(([, v]) => v !== undefined));
@@ -2476,6 +2494,13 @@ export default function App() {
       }
       return;
     }
+    if (!riderCanCancelTripInApp(t)) {
+      Alert.alert(
+        "Can’t cancel here",
+        "This ride can’t be canceled from the app now. Use checkout to finish payment, or contact support if you need help."
+      );
+      return;
+    }
     const tripId = [t._id, t.id].find((x) => x != null && String(x).length > 0);
     const idStr = tripId != null ? String(tripId) : "";
     if (!idStr || !token) {
@@ -3746,15 +3771,21 @@ export default function App() {
                 <Text style={styles.checkoutConfirmBtnText}>Confirm & pay</Text>
               )}
             </Pressable>
-            <Pressable
-              style={[styles.smallBtn, styles.warnBtn, styles.checkoutModalClearRide]}
-              onPress={() => void clearRide()}
-              disabled={busy || checkoutFinalizing || inTripTipBusy}
-              accessibilityRole="button"
-              accessibilityLabel="Cancel ride"
-            >
-              <Text style={styles.warnBtnText}>Cancel</Text>
-            </Pressable>
+            {trip && riderCanCancelTripInApp(trip) ? (
+              <Pressable
+                style={[styles.smallBtn, styles.warnBtn, styles.checkoutModalClearRide]}
+                onPress={() => void clearRide()}
+                disabled={busy || checkoutFinalizing || inTripTipBusy}
+                accessibilityRole="button"
+                accessibilityLabel="Cancel ride"
+              >
+                <Text style={styles.warnBtnText}>Cancel</Text>
+              </Pressable>
+            ) : trip ? (
+              <Text style={styles.checkoutModalSupportNote} accessibilityRole="text">
+                To dispute this trip, contact support.
+              </Text>
+            ) : null}
           </View>
         </View>
       </Modal>
@@ -4354,7 +4385,7 @@ export default function App() {
                     {(trip.status === "accepted" || trip.status === "in_progress") && renderInTripTipRow()}
                   </>
                   <View style={styles.row}>
-                    {trip && trip.status !== "completed" && trip.status !== "cancelled" ? (
+                    {trip && riderCanCancelTripInApp(trip) ? (
                       <Pressable
                         style={[styles.smallBtn, styles.warnBtn]}
                         onPress={clearRide}
@@ -4897,7 +4928,7 @@ export default function App() {
                 {(trip.status === "accepted" || trip.status === "in_progress") && renderInTripTipRow()}
               </>
               <View style={styles.row}>
-                {trip && trip.status !== "completed" && trip.status !== "cancelled" ? (
+                {trip && riderCanCancelTripInApp(trip) ? (
                   <Pressable
                     style={[styles.smallBtn, styles.warnBtn]}
                     onPress={clearRide}
@@ -5895,6 +5926,16 @@ const styles = StyleSheet.create({
   },
   checkoutModalScrollContent: { flexGrow: 0, paddingBottom: 4 },
   checkoutModalClearRide: { alignSelf: "center", marginTop: 14 },
+  checkoutModalSupportNote: {
+    alignSelf: "center",
+    marginTop: 14,
+    fontSize: 13,
+    ...pj.r,
+    color: "#64748b",
+    textAlign: "center",
+    lineHeight: 18,
+    paddingHorizontal: 12,
+  },
   postCheckoutPaymentCard: { paddingBottom: 24 },
   postCheckoutAmountLine: {
     fontSize: 15,

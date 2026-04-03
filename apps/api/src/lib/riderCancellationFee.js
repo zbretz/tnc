@@ -5,8 +5,8 @@
  * - Within 2 minutes after en route: $0.
  * - After that until pickup arrival: fee ramps as if linear from $0 → at-pickup tier, never below $5.
  * - At pickup (driver arrived, not yet in progress): max($5, 75% of quoted fare).
- * - In progress: same as at-pickup tier for the first 5 minutes, then full quoted fare.
- * - Awaiting checkout: full quoted fare.
+ * - In progress: same as at-pickup tier for the first 5 minutes (rider cancel in app/API stops after that).
+ * - Awaiting checkout: rider cannot cancel in app (finish payment); fee tier unused for rider-initiated cancel.
  *
  * Cancel-fee split (when charging): same as fare — appTakePercent of the cancel fee to platform;
  * remainder to driver pool (Stripe fee on transfer handled at payout like trip fare).
@@ -15,9 +15,28 @@
 import { computeAppTakeCents } from "./driverPayout.js";
 
 const MS_2M = 2 * 60 * 1000;
-const MS_5M = 5 * 60 * 1000;
+export const RIDER_CANCEL_IN_PROGRESS_GRACE_MS = 5 * 60 * 1000;
+const MS_5M = RIDER_CANCEL_IN_PROGRESS_GRACE_MS;
 const MIN_CANCEL_FEE_CENTS = 500;
 const RAMP_FALLBACK_MS = 15 * 60 * 1000;
+
+/**
+ * Rider-only: whether POST /trips/cancel and cancellation-quote are allowed.
+ * Driver/admin may still cancel later phases via API.
+ */
+export function riderMayInitiateCancelInApp(trip, now = new Date()) {
+  if (!trip) return false;
+  const st = trip?.status;
+  if (st === "awaiting_rider_checkout" || st === "completed" || st === "cancelled") return false;
+  if (st === "in_progress") {
+    const raw = trip.rideInProgressAt;
+    if (raw == null) return true;
+    const rideStartMs = new Date(raw).getTime();
+    if (!Number.isFinite(rideStartMs)) return true;
+    if (now.getTime() - rideStartMs > MS_5M) return false;
+  }
+  return true;
+}
 
 function quotedFareCentsFromTrip(trip) {
   const t = trip?.fareEstimate?.total;
@@ -98,7 +117,8 @@ export function computeRiderCancellationFeeCents(trip, now = new Date()) {
         return {
           feeCents: fullQuotedFareCents(fareCents),
           tier: "in_progress_late",
-          explanation: "Full quoted fare after 5+ minutes with the ride in progress.",
+          explanation:
+            "Full quoted fare (rider cancel is disabled in the app after 5 minutes in progress; driver/support may still end the trip).",
         };
       }
     }

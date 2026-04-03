@@ -29,6 +29,7 @@ import { processRiderCancelFeePayout } from "../lib/driverPayout.js";
 import {
   computeRiderCancellationFeeCents,
   computeCancelFeeSplitCents,
+  riderMayInitiateCancelInApp,
 } from "../lib/riderCancellationFee.js";
 import {
   notifyRiderDriverAccepted,
@@ -140,6 +141,13 @@ export function createTripsRouter(deps) {
       }
     } else {
       res.status(400).json({ error: "Cannot cancel" });
+      return;
+    }
+    if (isRider && !riderMayInitiateCancelInApp(trip)) {
+      res.status(400).json({
+        error:
+          "This trip can’t be canceled from the rider app. After checkout starts or late in an active ride, contact support if you need help.",
+      });
       return;
     }
     let cancelQuotePayload = null;
@@ -962,6 +970,10 @@ export function createTripsRouter(deps) {
     }
     if (String(trip.rider) !== req.userId) {
       res.status(403).json({ error: "Forbidden" });
+      return;
+    }
+    if (!riderMayInitiateCancelInApp(trip)) {
+      res.status(400).json({ error: "Cancellation isn’t available for this trip." });
       return;
     }
     const payload = await riderCancellationQuotePayload(trip);
