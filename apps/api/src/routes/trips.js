@@ -177,7 +177,9 @@ export function createTripsRouter(deps) {
     }
 
     const prev = trip.status;
+    const cancelledBy = isDriverAdmin ? "admin" : isRider ? "rider" : isDriver ? "driver" : null;
     trip.status = "cancelled";
+    if (cancelledBy) trip.cancelledBy = cancelledBy;
     trip.driverEnRouteToPickupAt = null;
     trip.driverArrivedAtPickupAt = null;
     trip.rideInProgressAt = null;

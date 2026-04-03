@@ -377,6 +377,15 @@ function driverTripPhaseIndicatorLabel(trip) {
   return "Active ride";
 }
 
+/** Foreground / socket: assigned driver sees why the trip disappeared (push may also notify). */
+function alertDriverTripCanceled(cancelledBy) {
+  let body = "This ride is no longer active. Check the list for new requests.";
+  if (cancelledBy === "rider") body = "The rider canceled this ride.";
+  else if (cancelledBy === "admin") body = "This ride was canceled by support.";
+  else if (cancelledBy === "driver") body = "This ride has been canceled.";
+  Alert.alert("Ride canceled", body);
+}
+
 export default function App() {
   const [token, setToken] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -1065,6 +1074,9 @@ export default function App() {
       if (!msg?.trip || String(msg.trip._id) !== String(tripId)) return;
       const next = msg.trip;
       if (next.status === "completed" || next.status === "cancelled") {
+        if (next.status === "cancelled") {
+          alertDriverTripCanceled(next.cancelledBy);
+        }
         setActiveTrip(null);
         setMe(null);
         loadAvailable(token);

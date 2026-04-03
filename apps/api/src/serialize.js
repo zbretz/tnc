@@ -229,6 +229,7 @@ export function serializeTrip(t, options = {}) {
     ...(t.awaitingRiderCheckoutDeadlineAt
       ? { awaitingRiderCheckoutDeadlineAt: t.awaitingRiderCheckoutDeadlineAt.toISOString() }
       : {}),
+    ...(t.status === "cancelled" && t.cancelledBy ? { cancelledBy: t.cancelledBy } : {}),
     ...(riderPhone ? { riderPhone } : {}),
     driverLocation: t.driverLocation?.updatedAt
       ? {

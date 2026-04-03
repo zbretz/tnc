@@ -67,6 +67,8 @@ const tripSchema = new mongoose.Schema(
       enum: ["requested", "accepted", "in_progress", "awaiting_rider_checkout", "completed", "cancelled"],
       default: "requested",
     },
+    /** Set when status becomes cancelled (for client messaging). */
+    cancelledBy: { type: String, enum: ["rider", "driver", "admin"] },
     /** When driver ends ride; auto-finalize job runs at this time if rider has not confirmed. */
     awaitingRiderCheckoutDeadlineAt: { type: Date, default: null },
     driverLocation: {

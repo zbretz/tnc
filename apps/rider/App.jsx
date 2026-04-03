@@ -2479,7 +2479,7 @@ export default function App() {
     const tripId = [t._id, t.id].find((x) => x != null && String(x).length > 0);
     const idStr = tripId != null ? String(tripId) : "";
     if (!idStr || !token) {
-      Alert.alert("Clear ride", "Missing trip id — try logging out and back in.");
+      Alert.alert("Cancel ride", "Missing trip id — try logging out and back in.");
       return;
     }
     let quote;
@@ -2514,7 +2514,7 @@ export default function App() {
                 returnToPlanningAfterTripEnds();
               }
             } catch (err) {
-              Alert.alert("Clear ride failed", err?.message ? String(err.message) : String(err));
+              Alert.alert("Couldn’t cancel ride", err?.message ? String(err.message) : String(err));
             } finally {
               setBusy(false);
             }
@@ -3750,8 +3750,10 @@ export default function App() {
               style={[styles.smallBtn, styles.warnBtn, styles.checkoutModalClearRide]}
               onPress={() => void clearRide()}
               disabled={busy || checkoutFinalizing || inTripTipBusy}
+              accessibilityRole="button"
+              accessibilityLabel="Cancel ride"
             >
-              <Text style={styles.warnBtnText}>Clear ride</Text>
+              <Text style={styles.warnBtnText}>Cancel</Text>
             </Pressable>
           </View>
         </View>
@@ -4357,8 +4359,10 @@ export default function App() {
                         style={[styles.smallBtn, styles.warnBtn]}
                         onPress={clearRide}
                         disabled={busy || checkoutFinalizing || inTripTipBusy}
+                        accessibilityRole="button"
+                        accessibilityLabel="Cancel ride"
                       >
-                        <Text style={styles.warnBtnText}>Clear ride</Text>
+                        <Text style={styles.warnBtnText}>Cancel</Text>
                       </Pressable>
                     ) : null}
                   </View>
@@ -4898,8 +4902,10 @@ export default function App() {
                     style={[styles.smallBtn, styles.warnBtn]}
                     onPress={clearRide}
                     disabled={busy || checkoutFinalizing || inTripTipBusy}
+                    accessibilityRole="button"
+                    accessibilityLabel="Cancel ride"
                   >
-                    <Text style={styles.warnBtnText}>Clear ride</Text>
+                    <Text style={styles.warnBtnText}>Cancel</Text>
                   </Pressable>
                 ) : null}
               </View>
